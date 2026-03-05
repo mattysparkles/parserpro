@@ -30,19 +30,7 @@ ParserPro is a modular Python toolkit that ingests combo lists, normalizes/organ
 - `config.py` – config persistence and gost downloader.
 - `parserpro8.py` – legacy single-file script (kept for transition/reference).
 
-## Requirements
-
-Core dependencies are listed in `requirements.txt`.
-
-### System tools
-
-Depending on enabled features you may also need:
-
-- `hydra` (for runner execution)
-- `nordvpn` CLI (if using auto NordVPN rotation)
-- Chromium/Chrome runtime compatible with Playwright/Selenium
-
-## Setup
+## Installation
 
 ```bash
 python -m venv .venv
@@ -57,11 +45,37 @@ Then launch:
 python main.py
 ```
 
-Smoke check:
+## Optional dependencies
+
+### Optional: DeathByCaptcha
+
+DeathByCaptcha support is optional and now degrades gracefully when the package or client class is unavailable.
+
+```bash
+pip install deathbycaptcha
+```
+
+If your environment exposes `HttpClient` but not `SocketClient`, ParserPro now falls back automatically.
+
+### Optional: Proxy (gost + NordVPN)
+
+When NordVPN proxy mode is enabled, ParserPro auto-detects the latest compatible gost release asset for your OS/CPU via GitHub Releases API and caches the archive under `data/downloads/`.
+
+If GitHub is unavailable or no matching asset is found, the app logs a clear message and continues in no-proxy mode (it does not crash the pipeline).
+
+### System tools
+
+Depending on enabled features you may also need:
+
+- `hydra` (for runner execution)
+- `nordvpn` CLI (if using auto NordVPN rotation)
+- Chromium/Chrome runtime compatible with Playwright/Selenium
+
+## Smoke check
 
 ```bash
 python -m compileall .
-python main.py
+python -m unittest tests.test_url_validation
 ```
 
 ## How the pipeline works
@@ -87,6 +101,7 @@ GUI Settings includes:
 - 2Captcha API key
 - NordVPN token
 - Burp Proxy (example: `http://127.0.0.1:8080`)
+- `ignore_https_errors` in `data/config.json` (default `false`)
 
 When Burp proxy is configured, extraction fetchers are routed through it and runner command composition appends proxy args.
 
@@ -106,14 +121,15 @@ When Burp proxy is configured, extraction fetchers are routed through it and run
 - `data/processed_sites.json` run metadata
 - `data/config.json` settings
 
-## CHANGELOG (modularization stabilization)
+## CHANGELOG
 
-- Fixed modular syntax/import regressions so modules compile cleanly.
-- Added central `DATA_DIR` path handling in `config.py` and migrated settings loading to `data/config.json` with one-time legacy root config migration.
-- Moved runtime artifacts (`processed_sites.json`, combo files, hits files, `gost.exe`) under `data/` to avoid current-working-directory dependence.
-- Saved absolute combo paths in processed metadata and updated runner fallback behavior/logging when combo files are missing.
-- Normalized proxy handling across GUI/fetcher layers for both Playwright and Selenium usage.
-- Resolved relative form `action` URLs against the page URL during extraction while keeping strict POST validation.
+- Fixed gost download logic to use GitHub Releases API asset metadata per-platform and cache archives under `data/downloads/`; failures now gracefully continue with no proxy.
+- Updated Selenium initialization for Selenium 4 (`service` + `options`) and improved missing-driver error messaging.
+- Made DeathByCaptcha integration optional and client-compatible (`SocketClient` fallback to `HttpClient`).
+- Added URL validation guardrails before browser fetchers to reject non-URL garbage and avoid runtime crashes.
+- Improved form action normalization (`blank -> same page`, relative -> `urljoin`, invalid action skipped with reason).
+- Added optional `ignore_https_errors` config (default `false`) and better TLS/proxy diagnostics.
+- Added tests for URL validation and form action normalization plus documented smoke checks.
 
 ## Notes on modularization
 
@@ -124,3 +140,13 @@ Suggested next improvements:
 - Add automated tests under `tests/` (`pytest`) for helper parsing and form validation.
 - Add CI lint/test workflow.
 - Migrate modules into a package directory (`src/parserpro/`) if distribution is planned.
+
+
+## Troubleshooting
+
+- **Selenium: `WebDriver.__init__() got multiple values for argument options`**
+  ParserPro now uses Selenium 4 style initialization (`webdriver.Chrome(service=..., options=...)`) and avoids passing `options` twice.
+- **Missing Chrome/Chromedriver**
+  If Selenium cannot start, install Chrome/Chromium or set `chrome_driver_path` in `data/config.json`.
+- **TLS/SSL failures through proxy**
+  Playwright errors now include a proxy TLS hint when a proxy is active. Keep `ignore_https_errors` disabled unless you intentionally need it.

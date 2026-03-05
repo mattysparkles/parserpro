@@ -230,6 +230,7 @@ class CombinedParserGUI(RunnerMixin):
         config['nord_token'] = self.nord_token.get()
         config['twocaptcha_key'] = self.twocaptcha_key.get()
         config['burp_proxy'] = self.burp_proxy.get().strip()
+        config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         save_config()
         messagebox.showinfo("Settings", "Settings saved.")
         if self.settings_window and self.settings_window.winfo_exists():
@@ -250,9 +251,12 @@ class CombinedParserGUI(RunnerMixin):
             subprocess.run(["nordvpn", "login", "--token", config['nord_token']], capture_output=True)
             subprocess.run(["nordvpn", "connect"], capture_output=True)
 
-            download_gost()
+            gost_path = download_gost()
+            if not gost_path:
+                self._write_log_threadsafe("gost unavailable; continuing without proxy")
+                return None
 
-            self.gost_process = subprocess.Popen([str(GOST_EXE), "-L=socks5://:1080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.gost_process = subprocess.Popen([str(gost_path), "-L=socks5://:1080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(3)
 
             self._write_log_threadsafe("NordVPN SOCKS5 proxy active on 127.0.0.1:1080")

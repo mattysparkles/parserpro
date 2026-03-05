@@ -70,3 +70,36 @@ def split_three_fields(line):
     if len(parts) != 3:
         return None
     return [p.strip() for p in parts]
+
+
+def validate_url(value):
+    if value is None:
+        return None
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    lowered = s.lower()
+    bad_markers = ["{", "}", "\n", "tostring:function", "[object", "major:"]
+    if any(marker in lowered for marker in bad_markers):
+        return None
+
+    if " " in s:
+        return None
+
+    if not s.startswith(("http://", "https://")):
+        if "." in s and not s.startswith("/"):
+            s = f"https://{s.lstrip('/')}"
+        else:
+            return None
+
+    try:
+        parsed = urlparse(s)
+    except Exception:
+        return None
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    return urlunparse(parsed)
