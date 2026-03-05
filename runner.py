@@ -6,7 +6,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import config
+from config import DATA_DIR, config
 from helpers import get_site_filename
 
 
@@ -18,7 +18,7 @@ class RunnerMixin:
         frame = ttk.Frame(tab, padding=12)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text="Hydra Runner - Select sites to attack", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=5)
+        ttk.Label(frame, text="Command Runner - Execute saved command templates", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=5)
 
         columns = ("Site", "Combos", "Last Run", "Status", "Hits")
         self.runner_tree = ttk.Treeview(frame, columns=columns, show="headings", height=15)
@@ -44,7 +44,7 @@ class RunnerMixin:
             combo_count = data.get("combo_count", 0)
             last_run = data.get("last_processed", "Never")
             status = "Form Found" if data.get("form_found", False) else "Failed / Pending"
-            hits_file = Path(f"hits_{base.replace('.', '_')}.txt")
+            hits_file = DATA_DIR / f"hits_{base.replace('.', '_')}.txt"
             hits_count = len(hits_file.read_text(encoding="utf-8").splitlines()) if hits_file.exists() else 0
 
             self.runner_tree.insert("", "end", values=(base, combo_count, last_run, status, hits_count))
@@ -70,6 +70,10 @@ class RunnerMixin:
         threading.Thread(target=self.execute_hydra, args=(all_sites,), daemon=True).start()
 
     def execute_hydra(self, sites):
+        if not config.get("runner_enabled", True):
+            self._write_log_threadsafe("Runner is disabled in config (runner_enabled=false).")
+            return
+
         for site in sites:
             if self.pipeline_cancelled:
                 self._write_log_threadsafe("Hydra execution cancelled by user.")
@@ -80,8 +84,17 @@ class RunnerMixin:
                 self._write_log_threadsafe(f"No Hydra command found for {site} — skipping.")
                 continue
 
-            combo_file = get_site_filename(site)
-            cmd = cmd_template.replace("{{combo_file}}", combo_file)
+            combo_path = self.processed_data.get(site, {}).get("combo_path")
+            if combo_path:
+                combo_file = Path(combo_path)
+            else:
+                combo_file = DATA_DIR / get_site_filename(site)
+
+            if not combo_file.exists():
+                self._write_log_threadsafe(f"Combo file missing for {site}: {combo_file}")
+                continue
+
+            cmd = cmd_template.replace("{{combo_file}}", str(combo_file.resolve()))
             burp_proxy = config.get("burp_proxy", "").strip()
             if burp_proxy and " -p " not in f" {cmd} ":
                 cmd = f"{cmd} -p {burp_proxy}"
@@ -98,7 +111,7 @@ class RunnerMixin:
                 for line in iter(process.stdout.readline, ""):
                     self._append_hydra_log_threadsafe(line)
                     if "[DATA]" in line and "password" in line.lower():
-                        with open(f"hits_{site.replace('.', '_')}.txt", "a", encoding="utf-8") as hf:
+                        with (DATA_DIR / f"hits_{site.replace('.', '_')}.txt").open("a", encoding="utf-8") as hf:
                             hf.write(line.strip() + "\n")
 
                 process.wait()
