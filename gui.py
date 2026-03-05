@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import threading
@@ -46,6 +47,10 @@ class CombinedParserGUI(RunnerMixin):
         self.pipeline_running = False
         self.pipeline_paused = False
         self.pipeline_cancelled = False
+        self.cancel_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.ui_queue = queue.Queue()
+        self._main_thread = threading.current_thread()
         self.gost_process = None
 
         self.processed_file = PROCESSED_SITES_FILE
@@ -57,7 +62,16 @@ class CombinedParserGUI(RunnerMixin):
         self.notebook = None
         self.settings_window = None
 
+        self.runner_rows_all = []
+        self.runner_rows_view = []
+        self.runner_sort_state = {}
+        self.runner_last_sort_col = None
+        self.runner_active_process = None
+        self.runner_thread = None
+        self.runner_running = False
+
         self._build_ui()
+        self.root.after(100, self._drain_ui_queue)
         self.root.after(500, self.refresh_runner_list)  # slight delay to ensure widgets are ready
 
     def load_processed_data(self):
@@ -72,21 +86,54 @@ class CombinedParserGUI(RunnerMixin):
         self.processed_file.write_text(json.dumps(self.processed_data, indent=2), encoding='utf-8')
 
     def _write_log_threadsafe(self, text):
-        self.root.after(0, lambda: self.log.insert(tk.END, text + "\n") or self.log.see(tk.END))
+        self.ui_queue.put(("extractor_log", text + "\n"))
 
     def _update_status_threadsafe(self, text):
-        self.root.after(0, lambda: self.status_text.set(text))
+        self.ui_queue.put(("status", text))
 
     def _update_progress_threadsafe(self, mode=None, maximum=None, value=None, stop=False):
-        def update():
-            if mode is not None: self.progress["mode"] = mode
-            if maximum is not None: self.progress["maximum"] = maximum
-            if value is not None: self.progress["value"] = value
-            if stop: self.progress.stop()
-        self.root.after(0, update)
+        self.ui_queue.put(("progress", {"mode": mode, "maximum": maximum, "value": value, "stop": stop}))
 
     def _show_progress_threadsafe(self, show):
-        self.root.after(0, lambda: self.progress.pack(fill="x", pady=8) if show else self.progress.pack_forget())
+        self.ui_queue.put(("progress_visible", bool(show)))
+
+    def _drain_ui_queue(self):
+        while True:
+            try:
+                event, payload = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if event == "extractor_log":
+                self.log.insert(tk.END, payload)
+                self.log.see(tk.END)
+            elif event == "hydra_log":
+                self.hydra_log.insert(tk.END, payload)
+                self.hydra_log.see(tk.END)
+            elif event == "status":
+                self.status_text.set(payload)
+            elif event == "progress":
+                if payload["mode"] is not None:
+                    self.progress["mode"] = payload["mode"]
+                if payload["maximum"] is not None:
+                    self.progress["maximum"] = payload["maximum"]
+                if payload["value"] is not None:
+                    self.progress["value"] = payload["value"]
+                if payload["stop"]:
+                    self.progress.stop()
+            elif event == "progress_visible":
+                if payload:
+                    self.progress.pack(fill="x", pady=8)
+                else:
+                    self.progress.pack_forget()
+            elif event == "pipeline_done":
+                self.cleanup_after_pipeline(payload)
+            elif event == "runner_done":
+                self.finish_runner_execution(payload)
+            elif event == "runner_refresh":
+                self.apply_runner_filters_and_sort()
+
+        self.root.after(100, self._drain_ui_queue)
 
     def _build_ui(self):
         notebook = ttk.Notebook(self.root)
@@ -354,6 +401,8 @@ class CombinedParserGUI(RunnerMixin):
         self.pipeline_running = True
         self.pipeline_paused = False
         self.pipeline_cancelled = False
+        self.cancel_event.clear()
+        self.pause_event.clear()
 
         self.start_button.config(state="disabled")
         self.pause_button.config(text="Pause", state="normal")
@@ -372,6 +421,8 @@ class CombinedParserGUI(RunnerMixin):
         self.pipeline_running = True
         self.pipeline_paused = False
         self.pipeline_cancelled = False
+        self.cancel_event.clear()
+        self.pause_event.clear()
 
         self.start_button.config(state="disabled")
         self.pause_button.config(text="Pause", state="normal")
@@ -383,26 +434,37 @@ class CombinedParserGUI(RunnerMixin):
         self.processing_thread.start()
 
     def toggle_pause(self):
-        if not self.pipeline_running:
+        if not self.pipeline_running and not self.runner_running:
             return
 
-        self.pipeline_paused = not self.pipeline_paused
-        if self.pipeline_paused:
+        is_paused = not self.pause_event.is_set()
+        if is_paused:
+            self.pause_event.set()
+            self.pipeline_paused = True
             self.pause_button.config(text="Resume")
             self.status_text.set("Paused")
+            log_once("pipeline-paused", "Pipeline/Runner paused; waiting before launching new work.")
         else:
+            self.pause_event.clear()
+            self.pipeline_paused = False
             self.pause_button.config(text="Pause")
             self.status_text.set("Running...")
 
     def cancel_pipeline(self):
-        if not self.pipeline_running:
+        if not self.pipeline_running and not self.runner_running:
             return
 
         self.pipeline_cancelled = True
         self.pipeline_paused = False
+        self.pause_event.clear()
+        self.cancel_event.set()
         self.status_text.set("Cancelling...")
+        self.cancel_button.config(state="disabled")
+        log_once("cancel-requested", "Cancellation requested; stopping outstanding work.")
+        self.terminate_active_runner_process()
 
-        self.root.after(500, self.check_thread_done)
+        if self.pipeline_running:
+            self.root.after(200, self.check_thread_done)
 
     def check_thread_done(self):
         if self.processing_thread and self.processing_thread.is_alive():
@@ -411,9 +473,15 @@ class CombinedParserGUI(RunnerMixin):
             self.cleanup_after_pipeline("Cancelled by user")
 
     def cleanup_after_pipeline(self, final_msg):
+        if threading.current_thread() is not self._main_thread:
+            self.ui_queue.put(("pipeline_done", final_msg))
+            return
+
         self.pipeline_running = False
         self.pipeline_paused = False
         self.pipeline_cancelled = False
+        self.cancel_event.clear()
+        self.pause_event.clear()
 
         self.start_button.config(state="normal")
         self.pause_button.config(state="disabled")
@@ -430,6 +498,11 @@ class CombinedParserGUI(RunnerMixin):
             if cli_path and self._windows_nordvpn_supported(cli_path):
                 subprocess.run([cli_path, "disconnect"], capture_output=True)
         self.save_processed_data()
+
+    def wait_if_paused_or_cancelled(self):
+        while self.pause_event.is_set() and not self.cancel_event.is_set():
+            time.sleep(0.2)
+        return self.cancel_event.is_set()
 
     def process_pipeline(self, retry_failed_only=False):
         try:
@@ -476,15 +549,13 @@ class CombinedParserGUI(RunnerMixin):
                 self._write_log_threadsafe(f"Parsing: {file.name}")
                 with file.open("r", encoding="utf-8", errors="replace") as f:
                     for ln, raw in enumerate(f, 1):
-                        if self.pipeline_cancelled:
+                        if self.cancel_event.is_set():
                             self.cleanup_after_pipeline("Cancelled during data collection")
                             return
 
-                        while self.pipeline_paused:
-                            time.sleep(0.5)
-                            if self.pipeline_cancelled:
-                                self.cleanup_after_pipeline("Cancelled while paused")
-                                return
+                        if self.wait_if_paused_or_cancelled():
+                            self.cleanup_after_pipeline("Cancelled while paused")
+                            return
 
                         line = raw.strip() if self.trim_whitespace.get() else raw.rstrip("\n\r")
                         if self.skip_blank.get() and not line:
@@ -565,13 +636,11 @@ class CombinedParserGUI(RunnerMixin):
 
                 def extract_for_site(base):
                     nonlocal rotation_counter
-                    if self.pipeline_cancelled:
+                    if self.cancel_event.is_set():
                         return None
 
-                    while self.pipeline_paused:
-                        time.sleep(0.5)
-                        if self.pipeline_cancelled:
-                            return None
+                    if self.wait_if_paused_or_cancelled():
+                        return None
 
                     urls_to_try = [base]
                     if not self.tld_only.get():
@@ -598,15 +667,13 @@ class CombinedParserGUI(RunnerMixin):
                 with ThreadPoolExecutor(max_workers=self.threads.get()) as executor:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
                     for i, future in enumerate(as_completed(future_to_base), 1):
-                        if self.pipeline_cancelled:
+                        if self.cancel_event.is_set():
                             self.cleanup_after_pipeline("Cancelled during extraction")
                             return
 
-                        while self.pipeline_paused:
-                            time.sleep(0.5)
-                            if self.pipeline_cancelled:
-                                self.cleanup_after_pipeline("Cancelled while paused")
-                                return
+                        if self.wait_if_paused_or_cancelled():
+                            self.cleanup_after_pipeline("Cancelled while paused")
+                            return
 
                         base = future_to_base[future]
                         try:

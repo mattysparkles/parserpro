@@ -76,6 +76,28 @@ Depending on enabled features you may also need:
 - `nordvpn` CLI (if using auto NordVPN rotation)
 - Chromium/Chrome runtime compatible with Playwright/Selenium
 
+
+## Runner tab UX controls
+
+The **Hydra Runner** tab now behaves like a generic command orchestrator with explicit row controls:
+
+- **Pause / Resume / Cancel semantics**
+  - **Pause** stops launching new subprocesses and waits cooperatively (no busy-spin loops).
+  - **Cancel** stops queued launches immediately and terminates any active subprocess (`terminate` then `kill` fallback).
+  - UI state returns to idle after worker completion through queue-driven main-thread updates.
+- **Sorting**
+  - Click any table header (`Combos`, `Status`, `Site`, `Hits`, `Last Run`) to toggle ascending/descending sorting.
+  - Numeric columns are sorted numerically; text columns are case-insensitive.
+- **Filtering**
+  - Minimum combos
+  - Status (`All / Pending / Running / Failed / Success`)
+  - Minimum hits
+  - Last run (`All / Never Run / Has Run`)
+- **Selection model**
+  - First column checkbox (`[ ]` / `[x]`) persists selection through sort/filter refreshes.
+  - Buttons: **Select All (Filtered)**, **Deselect All (Filtered)**, **Invert Selection (Filtered)**.
+  - **Run Selected** executes only rows currently marked selected.
+
 ## Smoke check
 
 ```bash
