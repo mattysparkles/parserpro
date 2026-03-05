@@ -118,6 +118,11 @@ def load_config():
     loaded.setdefault("vpn_control", "none")
     loaded.setdefault("proxy_url", "")
     loaded.setdefault("proxy_required", False)
+    loaded.setdefault("allow_nonstandard_ports", False)
+    loaded.setdefault("force_recheck", False)
+    loaded.setdefault("cache_ttl_days", 30)
+    loaded.setdefault("failed_retry_ttl_days", 1)
+    loaded.setdefault("debug_logging", False)
     return loaded
 
 

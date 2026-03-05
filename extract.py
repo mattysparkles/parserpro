@@ -9,7 +9,7 @@ except ImportError:
     HAS_BS4 = False
 
 from fetch import HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
-from helpers import validate_url
+from helpers import normalize_and_validate_target, validate_url
 
 
 def detect_failure_string(soup, url):
@@ -110,9 +110,9 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     if not HAS_BS4:
         return None, "bs4_not_installed"
 
-    url = validate_url(url)
+    url, invalid_reason = normalize_and_validate_target(url)
     if not url:
-        return None, "invalid_url"
+        return None, {"status": "skipped_invalid_target", "reason": invalid_reason or "invalid target"}
 
     html, error = fetch_page_playwright(url, proxy)
     fallback_used = False
@@ -122,7 +122,14 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         fallback_used = True
 
     if not html:
-        return None, error or "no_html"
+        if isinstance(error, dict):
+            return None, {
+                "status": "fetch_failed",
+                "error_code": error.get("code") or "UNKNOWN_FETCH_ERROR",
+                "error_message": error.get("message") or "fetch failed",
+                "hint": error.get("hint") or "network or browser error",
+            }
+        return None, {"status": "fetch_failed", "error_code": "UNKNOWN_FETCH_ERROR", "error_message": str(error or "no_html")}
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -151,14 +158,14 @@ def extract_login_form(url, proxy=None, strict_validation=True):
             best_reason = reason
 
     if not best_form:
-        return None, f"no_valid_form (best confidence: {best_confidence})"
+        return None, {"status": "no_form", "reason": f"no valid form (best confidence: {best_confidence})"}
 
     action = normalize_form_action(url, best_form.get("action"))
     if not action:
-        return None, "invalid action"
+        return None, {"status": "no_form", "reason": "invalid action"}
 
     if best_form.get("method", "post").lower() != "post":
-        return None, "non_post_form_selected"
+        return None, {"status": "no_form", "reason": "non-post form selected"}
 
     post_parts = []
     username_field = None
