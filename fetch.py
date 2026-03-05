@@ -8,8 +8,8 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-from config import config, normalize_proxy
-from helpers import USER_AGENTS, validate_url
+from config import config, get_effective_proxy
+from helpers import USER_AGENTS, log_once, validate_url
 
 try:
     from selenium import webdriver
@@ -64,12 +64,13 @@ def fetch_page_playwright(url, proxy=None):
     if not clean_url:
         return None, "invalid_url"
 
+    effective_proxy = get_effective_proxy(config, proxy)
+
     for attempt in range(2):
         try:
             launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
-            proxy_cfg = normalize_proxy(proxy)
-            if proxy_cfg:
-                launch_args["proxy"] = {"server": proxy_cfg["server"]}
+            if effective_proxy:
+                launch_args["proxy"] = {"server": effective_proxy["server"]}
 
             with sync_playwright() as p:
                 browser = p.chromium.launch(**launch_args)
@@ -100,8 +101,9 @@ def fetch_page_playwright(url, proxy=None):
             elif "ssl" in err_str or "tls" in err_str:
                 reason = "tls_error"
             if attempt == 1:
-                proxy_hint = " (proxy may be breaking TLS)" if normalize_proxy(proxy) and reason == "tls_error" else ""
-                print(f"Playwright failed {clean_url}: {e}{proxy_hint}")
+                if reason == "tls_error" and effective_proxy:
+                    log_once("proxy-tls-hint-playwright", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
+                print(f"Playwright failed {clean_url}: {e}")
             time.sleep(2)
     return None, reason
 
@@ -114,6 +116,8 @@ def fetch_page_selenium(url, proxy=None):
     if not clean_url:
         return None, "invalid_url"
 
+    effective_proxy = get_effective_proxy(config, proxy)
+
     try:
         options = Options()
         options.add_argument("--headless")
@@ -121,9 +125,11 @@ def fetch_page_selenium(url, proxy=None):
         options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        proxy_cfg = normalize_proxy(proxy)
-        if proxy_cfg and proxy_cfg.get("server"):
-            options.add_argument(f"--proxy-server={proxy_cfg['server']}")
+        if effective_proxy and effective_proxy.get("server"):
+            options.add_argument(f"--proxy-server={effective_proxy['server']}")
+
+        if bool(config.get("ignore_https_errors", False)):
+            options.add_argument("--ignore-certificate-errors")
 
         driver_path = (config.get("chrome_driver_path") or "").strip()
         if driver_path:
@@ -141,6 +147,8 @@ def fetch_page_selenium(url, proxy=None):
         message = str(e)
         if "driver" in message.lower() or "chromedriver" in message.lower():
             message = f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json"
+        if any(token in str(e).lower() for token in ("ssl", "tls", "certificate", "cert")) and effective_proxy:
+            log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
         print(f"Selenium failed {clean_url}: {message}")
         return None, "selenium_error"
 

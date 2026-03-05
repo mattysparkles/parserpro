@@ -2,6 +2,9 @@ import re
 import hashlib
 from urllib.parse import urlparse, urlunparse
 
+
+_LOGGED_ONCE_KEYS = set()
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
@@ -103,3 +106,10 @@ def validate_url(value):
         return None
 
     return urlunparse(parsed)
+
+
+def log_once(key, message):
+    if key in _LOGGED_ONCE_KEYS:
+        return
+    _LOGGED_ONCE_KEYS.add(key)
+    print(message)

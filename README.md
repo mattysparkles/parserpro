@@ -149,4 +149,8 @@ Suggested next improvements:
 - **Missing Chrome/Chromedriver**
   If Selenium cannot start, install Chrome/Chromium or set `chrome_driver_path` in `data/config.json`.
 - **TLS/SSL failures through proxy**
-  Playwright errors now include a proxy TLS hint when a proxy is active. Keep `ignore_https_errors` disabled unless you intentionally need it.
+  Playwright/Selenium now log a TLS hint when a proxy is active (`proxy may be breaking TLS`). Keep `ignore_https_errors` disabled unless you intentionally need it.
+- **`ERR_SOCKS_CONNECTION_FAILED`**
+  Your SOCKS proxy endpoint is not reachable (commonly `127.0.0.1:1080` when gost is not running). Disable proxy settings (`burp_proxy`, `socks_proxy`, `proxy`) or start the proxy process.
+- **Verify proxy health quickly**
+  Confirm the listener is up before extraction, e.g. `python -c "import socket;print(socket.create_connection(('127.0.0.1',1080),1))"` (should connect without exception).
