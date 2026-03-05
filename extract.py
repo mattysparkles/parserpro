@@ -185,7 +185,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     failure = detect_failure_string(soup, url)
 
     target = urlparse(url).netloc or url
-    cmd_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:F={failure}" -V -t 4 -f'
+    cmd_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:{failure}" -V -t 4 -f'
 
     return {
         "original_url": url,
