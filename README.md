@@ -256,3 +256,39 @@ Some combo lists contain host:port endpoints that are not browser login pages (f
 
 - **What “login-ish” means**
   ParserPro now stores forms with password fields even if they are not strict POST login forms. These entries are marked `success_loginish` with metadata (`method`, `action_url`, `user_field`, `pass_field`, `submit_mode`, confidence/reasons) so reruns can skip redundant fetches while still surfacing useful extraction context.
+
+
+## Project files (.pproj / .parserproproj.json)
+
+ParserPro now supports portable **project files** with schema versioning (`schema_version: 1`). A project captures session context without storing secrets:
+
+- Project name, created/last-saved timestamps
+- Input references and embedded site list snapshot
+- Runner filter state + sort state + selected rows
+- Results snapshot per site (status, extraction metadata, error code/hint/detail, timestamps)
+- Session-safe settings (`proxy_url`, `allow_nonstandard_ports`, `ignore_https_errors`, autosave preferences)
+
+Use **File → New/Open/Save/Save As** in the GUI. Project writes use atomic temp-file replacement to reduce corruption risk.
+
+## Report export
+
+Use **File → Export → JSON/CSV**.
+
+- JSON includes project metadata, summary counts, and per-site records.
+- CSV flattens key per-site fields using UTF-8 with standard CSV quoting.
+- Exports can target either full data or the current filtered view.
+
+## Troubleshooting dashboard
+
+A new **Troubleshooting** tab summarizes failures by category:
+
+- DNS failures (`dns_failed`, `ERR_NAME_NOT_RESOLVED`)
+- TLS failures (`tls_mismatch`, `cert_invalid`)
+- Proxy failures (`proxy_down`, `ERR_SOCKS_CONNECTION_FAILED`)
+- Connection closed (`conn_closed`, `ERR_CONNECTION_CLOSED`)
+- Other fetch failures
+
+The tab shows category counts, top failing domains, per-site details, static recommended actions, and includes:
+
+- **Retry Failed** (re-queues failed sites using existing controls)
+- **Export Diagnostics CSV**
