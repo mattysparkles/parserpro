@@ -1,5 +1,6 @@
 import random
 import time
+import traceback
 
 try:
     from playwright.sync_api import sync_playwright
@@ -8,8 +9,9 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
+from app_logging import logger, log_once
 from config import config, get_effective_proxy
-from helpers import USER_AGENTS, log_once, normalize_and_validate_target
+from helpers import USER_AGENTS, normalize_and_validate_target
 
 try:
     from selenium import webdriver
@@ -40,6 +42,45 @@ except ImportError:
     HAS_2CAPTCHA = False
 
 
+ERROR_CODE_MAP = {
+    "ERR_NAME_NOT_RESOLVED": ("dns_failed", "DNS resolution failed"),
+    "ERR_CONNECTION_CLOSED": ("conn_closed", "Connection closed by peer or non-web endpoint"),
+    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH": ("tls_mismatch", "TLS handshake failed (proxy/AV may interfere)"),
+    "ERR_CERT_AUTHORITY_INVALID": ("cert_invalid", "Untrusted certificate (MITM/captive portal)"),
+    "ERR_SOCKS_CONNECTION_FAILED": ("proxy_down", "SOCKS proxy unreachable"),
+}
+
+
+def classify_nav_error(exc_text: str):
+    text = str(exc_text or "")
+    lowered = text.lower()
+    for signature, mapped in ERROR_CODE_MAP.items():
+        if signature.lower() in lowered:
+            return mapped
+    return "fetch_failed", "Navigation failed"
+
+
+def short_error_detail(exc_text: str, max_len=220):
+    detail = " ".join(str(exc_text or "").split())
+    return detail[:max_len]
+
+
+def build_error_payload(code, hint, detail, stacktrace=None):
+    payload = {"code": code, "hint": hint, "detail": short_error_detail(detail)}
+    if stacktrace:
+        payload["stacktrace"] = stacktrace
+    return payload
+
+
+def _debug_stack(prefix, exc):
+    if not bool(config.get("debug_logging", False)):
+        return None
+    stack = traceback.format_exc()
+    logger.debug(f"{prefix}: {exc}")
+    logger.debug(stack)
+    return stack
+
+
 def get_dbc_client(user, password):
     if not user or not password:
         return None
@@ -56,52 +97,72 @@ def get_dbc_client(user, password):
     return None
 
 
+def _fetch_page_playwright_once(clean_url, effective_proxy):
+    launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
+    if effective_proxy:
+        launch_args["proxy"] = {"server": effective_proxy["server"]}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**launch_args)
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=random.choice(USER_AGENTS),
+            locale="en-US",
+            ignore_https_errors=bool(config.get("ignore_https_errors", False)),
+            java_script_enabled=True,
+            bypass_csp=True,
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+        page = context.new_page()
+        page.goto(clean_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(4000)
+        html = page.content()
+        browser.close()
+        return html
+
+
 def fetch_page_playwright(url, proxy=None):
     if not HAS_PLAYWRIGHT:
         return None, "playwright_not_installed"
 
     clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not clean_url:
-        return None, build_error_payload("INVALID_TARGET", reason or "invalid target", reason or "invalid target")
+        return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
     except RuntimeError as e:
-        print(f"Proxy requirement error: {e}")
-        return None, "proxy_required_unreachable"
+        return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
-    for attempt in range(2):
+    retried_without_proxy = False
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
         try:
-            launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
-            if effective_proxy:
-                launch_args["proxy"] = {"server": effective_proxy["server"]}
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(**launch_args)
-                context = browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    user_agent=random.choice(USER_AGENTS),
-                    locale="en-US",
-                    ignore_https_errors=bool(config.get("ignore_https_errors", False)),
-                    java_script_enabled=True,
-                    bypass_csp=True,
-                )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
-                page = context.new_page()
-                page.goto(clean_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(4000)
-                html = page.content()
-                browser.close()
-                return html, None
+            return _fetch_page_playwright_once(clean_url, effective_proxy), None
         except Exception as e:
-            code, message, hint = classify_browser_error(e)
-            if attempt == 1:
-                if code in {"ERR_SSL_VERSION_OR_CIPHER_MISMATCH", "ERR_CERT_AUTHORITY_INVALID"} and effective_proxy:
-                    log_once("proxy-tls-hint-playwright", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
-                if bool(config.get("debug_logging", False)):
-                    print(f"Playwright failed {clean_url}: {message}")
-            time.sleep(2)
-    return None, build_error_payload(code, message, hint)
+            stack = _debug_stack(f"Playwright failed {clean_url}", e)
+            code, hint = classify_nav_error(str(e))
+            detail = str(e)
+
+            if code == "proxy_down" and effective_proxy and not retried_without_proxy:
+                log_once("proxy-down", "Proxy appears unreachable; retrying once without proxy", level="WARN")
+                effective_proxy = None
+                retried_without_proxy = True
+                continue
+
+            if code == "conn_closed" and attempts < 2:
+                time.sleep(1.0)
+                continue
+
+            if code == "dns_failed":
+                log_once("dns-failed", "DNS failures detected; recording without immediate retry", level="WARN")
+
+            if code in {"tls_mismatch", "cert_invalid"} and effective_proxy:
+                log_once("proxy-tls-hint-playwright", "TLS error detected while proxy is enabled; proxy may be breaking TLS", level="WARN")
+            return None, build_error_payload(code, hint, detail, stacktrace=stack)
+
+    return None, build_error_payload("fetch_failed", "Navigation failed", "unknown playwright failure")
 
 
 def fetch_page_selenium(url, proxy=None):
@@ -110,13 +171,12 @@ def fetch_page_selenium(url, proxy=None):
 
     clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not clean_url:
-        return None, build_error_payload("INVALID_TARGET", reason or "invalid target", reason or "invalid target")
+        return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
     except RuntimeError as e:
-        print(f"Proxy requirement error: {e}")
-        return None, "proxy_required_unreachable"
+        return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
     try:
         options = Options()
@@ -144,16 +204,19 @@ def fetch_page_selenium(url, proxy=None):
         driver.quit()
         return html, None
     except Exception as e:
-        code, message, hint = classify_browser_error(e)
+        stack = _debug_stack(f"Selenium failed {clean_url}", e)
+        code, hint = classify_nav_error(str(e))
+        message = str(e)
         if "driver" in message.lower() or "chromedriver" in message.lower():
-            message = f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json"
-            code = "DRIVER_ERROR"
-            hint = "browser driver is missing or misconfigured"
-        if any(token in str(e).lower() for token in ("ssl", "tls", "certificate", "cert")) and effective_proxy:
-            log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
-        if bool(config.get("debug_logging", False)):
-            print(f"Selenium failed {clean_url}: {message}")
-        return None, build_error_payload(code, message, hint)
+            return None, build_error_payload(
+                "driver_error",
+                "browser driver is missing or misconfigured",
+                f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json",
+                stacktrace=stack,
+            )
+        if code in {"tls_mismatch", "cert_invalid"} and effective_proxy:
+            log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS", level="WARN")
+        return None, build_error_payload(code, hint, message, stacktrace=stack)
 
 
 def solve_captcha(soup, url):
@@ -185,9 +248,9 @@ def solve_captcha(soup, url):
                 captcha = client.decode(sitekey=sitekey, url=url, type=captcha_type)
                 token = captcha["text"]
             else:
-                print("DeathByCaptcha client unavailable (SocketClient/HttpClient not found); skipping DBC.")
+                logger.warn("DeathByCaptcha client unavailable (SocketClient/HttpClient not found); skipping DBC.")
         except Exception as e:
-            print(f"DeathByCaptcha failed: {e}")
+            logger.warn(f"DeathByCaptcha failed: {e}")
 
     if not token and HAS_2CAPTCHA and config.get("twocaptcha_key"):
         try:
@@ -197,35 +260,6 @@ def solve_captcha(soup, url):
             elif captcha_type == "hcaptcha":
                 token = solver.hcaptcha(sitekey=sitekey, url=url)["code"]
         except Exception as e:
-            print(f"2Captcha failed: {e}")
+            logger.warn(f"2Captcha failed: {e}")
 
     return token
-ERROR_SIGNATURES = {
-    "ERR_CONNECTION_CLOSED": ["err_connection_closed", "connection closed"],
-    "ERR_NAME_NOT_RESOLVED": ["err_name_not_resolved", "name not resolved"],
-    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH": ["err_ssl_version_or_cipher_mismatch", "ssl version", "cipher mismatch"],
-    "ERR_CERT_AUTHORITY_INVALID": ["err_cert_authority_invalid", "certificate", "authority invalid", "net::err_cert"],
-    "ERR_SOCKS_CONNECTION_FAILED": ["err_socks_connection_failed", "socks"],
-}
-
-ERROR_HINTS = {
-    "ERR_CONNECTION_CLOSED": "remote endpoint closed the connection",
-    "ERR_NAME_NOT_RESOLVED": "hostname could not be resolved",
-    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH": "TLS settings are incompatible",
-    "ERR_CERT_AUTHORITY_INVALID": "certificate trust validation failed",
-    "ERR_SOCKS_CONNECTION_FAILED": "proxy tunnel failed",
-    "UNKNOWN_FETCH_ERROR": "network or browser error",
-}
-
-
-def classify_browser_error(exc):
-    message = str(exc).strip()
-    lowered = message.lower()
-    for code, markers in ERROR_SIGNATURES.items():
-        if any(marker in lowered for marker in markers):
-            return code, message, ERROR_HINTS.get(code, "browser navigation failure")
-    return "UNKNOWN_FETCH_ERROR", message, ERROR_HINTS["UNKNOWN_FETCH_ERROR"]
-
-
-def build_error_payload(code, message, hint):
-    return {"code": code, "message": message, "hint": hint}

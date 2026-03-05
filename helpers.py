@@ -2,8 +2,8 @@ import re
 import hashlib
 from urllib.parse import urlparse, urlunparse
 
+from app_logging import log_once
 
-_LOGGED_ONCE_KEYS = set()
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -124,6 +124,9 @@ def normalize_and_validate_target(raw, allow_nonstandard_ports=False):
     if " " in candidate:
         return None, "invalid target format"
 
+    if "://" in candidate and not candidate.startswith(("http://", "https://")):
+        return None, "unsupported scheme"
+
     if not candidate.startswith(("http://", "https://")):
         if candidate.startswith("//"):
             candidate = f"https:{candidate}"
@@ -153,9 +156,3 @@ def normalize_and_validate_target(raw, allow_nonstandard_ports=False):
 
     return urlunparse(parsed), None
 
-
-def log_once(key, message):
-    if key in _LOGGED_ONCE_KEYS:
-        return
-    _LOGGED_ONCE_KEYS.add(key)
-    print(message)
