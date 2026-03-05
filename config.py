@@ -65,11 +65,17 @@ def proxy_is_reachable(proxy_dict, timeout=1.0):
         return False
 
 
-def get_effective_proxy(cfg, runtime_proxy=None):
+def get_vpn_control(cfg):
+    raw = str((cfg or {}).get("vpn_control", "none")).strip().lower()
+    return raw if raw in {"none", "nordvpn"} else "none"
+
+
+def get_effective_proxy(cfg, runtime_proxy=None, fail_fast=None):
     configured_proxy = runtime_proxy
     if configured_proxy is None:
         configured_proxy = (
-            cfg.get("burp_proxy")
+            cfg.get("proxy_url")
+            or cfg.get("burp_proxy")
             or cfg.get("socks_proxy")
             or cfg.get("proxy")
             or None
@@ -81,6 +87,10 @@ def get_effective_proxy(cfg, runtime_proxy=None):
 
     if proxy_is_reachable(proxy_cfg):
         return proxy_cfg
+
+    required = bool(cfg.get("proxy_required", False)) if fail_fast is None else bool(fail_fast)
+    if required:
+        raise RuntimeError(f"Configured proxy is unreachable: {proxy_cfg.get('server', '')}")
 
     log_once(
         f"proxy-unreachable:{proxy_cfg.get('server', '')}",
@@ -105,6 +115,9 @@ def load_config():
         except Exception:
             loaded = {}
     loaded.setdefault("ignore_https_errors", False)
+    loaded.setdefault("vpn_control", "none")
+    loaded.setdefault("proxy_url", "")
+    loaded.setdefault("proxy_required", False)
     return loaded
 
 

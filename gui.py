@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import platform
 import shutil
 import subprocess
 import threading
@@ -12,9 +13,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from config import DATA_DIR, GOST_EXE, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, save_config
+from config import DATA_DIR, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, get_vpn_control, save_config
 from extract import extract_login_form
-from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, normalize_site, split_three_fields
+from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_site, split_three_fields
 from runner import RunnerMixin
 
 
@@ -35,8 +36,8 @@ class CombinedParserGUI(RunnerMixin):
         self.extract_forms = tk.BooleanVar(value=True)
         self.skip_blank = tk.BooleanVar(value=True)
         self.trim_whitespace = tk.BooleanVar(value=True)
-        self.use_proxy = tk.BooleanVar(value=True)
-        self.proxy_url = tk.StringVar(value="socks5://127.0.0.1:1080")
+        self.use_proxy = tk.BooleanVar(value=get_vpn_control(config) == "nordvpn")
+        self.proxy_url = tk.StringVar(value=config.get("proxy_url", ""))
         self.tld_only = tk.BooleanVar(value=True)
         self.threads = tk.IntVar(value=6)
         self.strict_validation = tk.BooleanVar(value=True)
@@ -159,8 +160,8 @@ class CombinedParserGUI(RunnerMixin):
 
         proxy_f = ttk.LabelFrame(mid_grid, text="Proxy / VPN (NordVPN Auto)", padding=10)
         proxy_f.grid(row=0, column=2, sticky="nsew", padx=10)
-        ttk.Checkbutton(proxy_f, text="Enable NordVPN Auto-Proxy + Rotation", variable=self.use_proxy).pack(anchor="w")
-        ttk.Label(proxy_f, text="NordVPN token set in Settings").pack(anchor="w")
+        ttk.Label(proxy_f, text="VPN behavior is controlled by Settings → vpn_control").pack(anchor="w")
+        ttk.Label(proxy_f, text="Use proxy_url for an already-running SOCKS/HTTP proxy").pack(anchor="w")
 
         thread_f = ttk.LabelFrame(main, text="Extraction Speed", padding=10)
         thread_f.pack(fill="x", pady=6)
@@ -200,7 +201,7 @@ class CombinedParserGUI(RunnerMixin):
         settings_window = tk.Toplevel(self.root)
         self.settings_window = settings_window
         settings_window.title("Settings")
-        settings_window.geometry("500x400")
+        settings_window.geometry("560x560")
 
         ttk.Label(settings_window, text="DeathByCaptcha Username").pack(pady=5)
         self.dbc_user = tk.StringVar(value=config.get("dbc_user", ""))
@@ -215,6 +216,17 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Entry(settings_window, textvariable=self.nord_token).pack(pady=5)
 
         ttk.Label(settings_window, text="2Captcha API Key (optional)").pack(pady=5)
+        ttk.Label(settings_window, text="VPN Control").pack(pady=5)
+        self.vpn_control = tk.StringVar(value=get_vpn_control(config))
+        ttk.Combobox(settings_window, textvariable=self.vpn_control, values=["none", "nordvpn"], state="readonly").pack(pady=5)
+
+        ttk.Label(settings_window, text="Proxy URL (optional, socks5/http)").pack(pady=5)
+        self.proxy_url_setting = tk.StringVar(value=config.get("proxy_url", ""))
+        ttk.Entry(settings_window, textvariable=self.proxy_url_setting).pack(pady=5, fill="x", padx=16)
+
+        self.proxy_required = tk.BooleanVar(value=bool(config.get("proxy_required", False)))
+        ttk.Checkbutton(settings_window, text="Require proxy (fail fast if unreachable)", variable=self.proxy_required).pack(pady=5)
+
         self.twocaptcha_key = tk.StringVar(value=config.get("twocaptcha_key", ""))
         ttk.Entry(settings_window, textvariable=self.twocaptcha_key).pack(pady=5)
 
@@ -229,6 +241,9 @@ class CombinedParserGUI(RunnerMixin):
         config['dbc_pass'] = self.dbc_pass.get()
         config['nord_token'] = self.nord_token.get()
         config['twocaptcha_key'] = self.twocaptcha_key.get()
+        config['vpn_control'] = self.vpn_control.get().strip().lower()
+        config['proxy_url'] = self.proxy_url_setting.get().strip()
+        config['proxy_required'] = bool(self.proxy_required.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         save_config()
@@ -236,46 +251,66 @@ class CombinedParserGUI(RunnerMixin):
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.destroy()
 
-    def setup_nordvpn_proxy(self):
+    def _resolve_nordvpn_cli(self):
+        for candidate in ("nordvpn", "nordvpncli"):
+            cli_path = shutil.which(candidate)
+            if cli_path:
+                return cli_path
+        return None
+
+    def _windows_nordvpn_supported(self, cli_path):
+        if platform.system().lower() != "windows":
+            return True
+        if "nordvpngui" in Path(cli_path).name.lower():
+            return False
         try:
-            if not config.get('nord_token'):
-                self._write_log_threadsafe("No NordVPN token set - using no proxy")
-                self.proxy_url.set("")
+            result = subprocess.run([cli_path, "--help"], capture_output=True, text=True, timeout=5)
+            help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+            help_text = help_text.lower()
+        except Exception:
+            return False
+        return "connect" in help_text and "disconnect" in help_text
+
+    def setup_nordvpn_proxy(self):
+        if get_vpn_control(config) != "nordvpn":
+            return None
+        try:
+            cli_path = self._resolve_nordvpn_cli()
+            if not cli_path or not self._windows_nordvpn_supported(cli_path):
+                msg = "NordVPN automation not supported on Windows; set vpn_control='none' and manage VPN externally."
+                self._write_log_threadsafe(msg)
+                log_once("nordvpn-windows-unsupported", msg)
                 return None
 
-            if not shutil.which("nordvpn"):
-                self._write_log_threadsafe("NordVPN CLI not found in PATH - using no proxy")
-                self.proxy_url.set("")
+            if not config.get('nord_token'):
+                self._write_log_threadsafe("No NordVPN token set - using no proxy")
                 return None
 
             self._write_log_threadsafe("Setting up NordVPN + SOCKS5 proxy...")
-
-            subprocess.run(["nordvpn", "login", "--token", config['nord_token']], capture_output=True)
-            subprocess.run(["nordvpn", "connect"], capture_output=True)
+            subprocess.run([cli_path, "login", "--token", config['nord_token']], capture_output=True)
+            subprocess.run([cli_path, "connect"], capture_output=True)
 
             gost_path = download_gost()
             if not gost_path:
                 self._write_log_threadsafe("gost unavailable; continuing without proxy")
-                self.proxy_url.set("")
                 return None
 
             self.gost_process = subprocess.Popen([str(gost_path), "-L=socks5://:1080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(3)
-
-            self._write_log_threadsafe("NordVPN SOCKS5 proxy active on 127.0.0.1:1080")
             return {"server": "socks5://127.0.0.1:1080"}
-
         except Exception as e:
             self._write_log_threadsafe(f"NordVPN / gost setup failed: {e}. Falling back to no proxy.")
-            self.proxy_url.set("")
             return None
 
     def rotate_nordvpn(self):
+        if get_vpn_control(config) != "nordvpn":
+            return
         try:
-            if not shutil.which("nordvpn"):
+            cli_path = self._resolve_nordvpn_cli()
+            if not cli_path or not self._windows_nordvpn_supported(cli_path):
                 return
-            subprocess.run(["nordvpn", "disconnect"], capture_output=True)
-            subprocess.run(["nordvpn", "connect"], capture_output=True)
+            subprocess.run([cli_path, "disconnect"], capture_output=True)
+            subprocess.run([cli_path, "connect"], capture_output=True)
             self._write_log_threadsafe("Rotated NordVPN IP")
         except Exception as e:
             self._write_log_threadsafe(f"IP rotation failed: {e}")
@@ -390,8 +425,10 @@ class CombinedParserGUI(RunnerMixin):
         if self.gost_process:
             self.gost_process.terminate()
             self.gost_process = None
-        if shutil.which("nordvpn"):
-            subprocess.run(["nordvpn", "disconnect"], capture_output=True)
+        if get_vpn_control(config) == "nordvpn":
+            cli_path = self._resolve_nordvpn_cli()
+            if cli_path and self._windows_nordvpn_supported(cli_path):
+                subprocess.run([cli_path, "disconnect"], capture_output=True)
         self.save_processed_data()
 
     def process_pipeline(self, retry_failed_only=False):
@@ -493,11 +530,12 @@ class CombinedParserGUI(RunnerMixin):
 
             self.save_processed_data()
 
-            proxy_candidate = self.setup_nordvpn_proxy() if self.use_proxy.get() else None
-            burp_server = config.get("burp_proxy", "").strip()
-            if burp_server:
-                proxy_candidate = burp_server
-                self._write_log_threadsafe(f"Using Burp proxy for extraction: {burp_server}")
+            proxy_candidate = None
+            if get_vpn_control(config) == "nordvpn":
+                proxy_candidate = self.setup_nordvpn_proxy()
+
+            if get_vpn_control(config) == "none" and config.get("proxy_url", "").strip():
+                self._write_log_threadsafe(f"Using configured proxy_url for extraction: {config.get('proxy_url', '').strip()}")
 
             proxy = get_effective_proxy(config, proxy_candidate)
 
@@ -552,7 +590,7 @@ class CombinedParserGUI(RunnerMixin):
                         fail_reason = error or fail_reason
 
                     rotation_counter += 1
-                    if rotation_counter % 10 == 0 or fail_reason:
+                    if get_vpn_control(config) == "nordvpn" and (rotation_counter % 10 == 0 or fail_reason):
                         self.rotate_nordvpn()
 
                     return form, fail_reason
