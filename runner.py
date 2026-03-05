@@ -165,6 +165,8 @@ class RunnerMixin:
             filtered.append(row)
 
         self.runner_rows_view = filtered
+        if hasattr(self, "request_autosave"):
+            self.request_autosave()
         if self.runner_last_sort_col:
             reverse = self.runner_sort_state.get(self.runner_last_sort_col, False)
             self.sort_treeview(self.runner_last_sort_col, reverse)

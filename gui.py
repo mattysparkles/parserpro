@@ -19,6 +19,19 @@ from config import DATA_DIR, PROCESSED_SITES_FILE, config, download_gost, get_ef
 from extract import extract_login_form
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
+from project_io import (
+    AutosaveWorker,
+    atomic_write_json,
+    build_project_payload,
+    diagnostics_summary,
+    export_rows_csv,
+    export_rows_json,
+    load_project_payload,
+    site_report_rows,
+    summarize_status_counts,
+    top_failing_domains,
+    utc_now_iso,
+)
 
 
 def apply_theme(root):
@@ -81,6 +94,15 @@ class CombinedParserGUI(RunnerMixin):
 
         self.processed_file = PROCESSED_SITES_FILE
         self.processed_data = self.load_processed_data()
+        self.sites_db = self.processed_data
+
+        self.current_project_path = None
+        self.current_project_name = "Untitled"
+        self.project_created_ts = utc_now_iso()
+        self.project_label_var = tk.StringVar(value="Project: Untitled")
+        self.autosave_enabled = tk.BooleanVar(value=bool(config.get("autosave_enabled", True)))
+        self.autosave_interval_minutes = tk.IntVar(value=int(config.get("autosave_interval_minutes", 2)))
+        self.autosave_worker = AutosaveWorker(self._autosave_now)
 
         self.runner_tree = None
         self.hydra_log = None
@@ -97,8 +119,11 @@ class CombinedParserGUI(RunnerMixin):
         self.runner_running = False
 
         self._build_ui()
+        self._build_menu()
         self.root.after(100, self._drain_ui_queue)
         self.root.after(500, self.refresh_runner_list)  # slight delay to ensure widgets are ready
+        self._schedule_autosave_tick()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
 
     def load_processed_data(self):
         if self.processed_file.exists():
@@ -111,6 +136,22 @@ class CombinedParserGUI(RunnerMixin):
 
     def save_processed_data(self):
         self.processed_file.write_text(json.dumps(self.processed_data, indent=2), encoding='utf-8')
+
+    def _build_menu(self):
+        menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="New Project", command=self.new_project)
+        file_menu.add_command(label="Open Project", command=self.open_project)
+        file_menu.add_command(label="Save Project", command=self.save_project)
+        file_menu.add_command(label="Save Project As", command=lambda: self.save_project(as_new=True))
+        export_menu = tk.Menu(file_menu, tearoff=0)
+        export_menu.add_command(label="JSON", command=self.export_report_json)
+        export_menu.add_command(label="CSV", command=self.export_report_csv)
+        file_menu.add_cascade(label="Export", menu=export_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_exit)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        self.root.config(menu=menu_bar)
 
     def _migrate_processed_schema(self, raw):
         migrated = {}
@@ -248,14 +289,19 @@ class CombinedParserGUI(RunnerMixin):
         runner_tab = ttk.Frame(notebook)
         notebook.add(runner_tab, text="Hydra Runner")
 
+        troubleshooting_tab = ttk.Frame(notebook)
+        notebook.add(troubleshooting_tab, text="Troubleshooting")
+
         self.build_extractor_tab(extractor_tab)
         self.build_runner_tab(runner_tab)
+        self.build_troubleshooting_tab(troubleshooting_tab)
 
         status_bar = ttk.Frame(container, padding=(8, 4))
         status_bar.grid(row=1, column=0, sticky="ew")
         status_bar.columnconfigure(0, weight=1)
         ttk.Label(status_bar, textvariable=self.status_text).grid(row=0, column=0, sticky="w")
-        ttk.Label(status_bar, textvariable=self.state_text).grid(row=0, column=1, sticky="e")
+        ttk.Label(status_bar, textvariable=self.project_label_var).grid(row=0, column=1, sticky="e", padx=(4, 20))
+        ttk.Label(status_bar, textvariable=self.state_text).grid(row=0, column=2, sticky="e")
 
         def on_tab_changed(event):
             selected_tab = notebook.select()
@@ -459,6 +505,12 @@ class CombinedParserGUI(RunnerMixin):
         self.debug_logging = tk.BooleanVar(value=bool(config.get("debug_logging", False)))
         ttk.Checkbutton(settings_window, text="Enable debug logging", variable=self.debug_logging).pack(pady=5)
 
+        self.autosave_enabled_setting = tk.BooleanVar(value=self.autosave_enabled.get())
+        ttk.Checkbutton(settings_window, text="Enable autosave for project files", variable=self.autosave_enabled_setting).pack(pady=5)
+        ttk.Label(settings_window, text="Autosave interval (minutes)").pack(pady=5)
+        self.autosave_interval_setting = tk.IntVar(value=self.autosave_interval_minutes.get())
+        ttk.Entry(settings_window, textvariable=self.autosave_interval_setting).pack(pady=5)
+
         ttk.Label(settings_window, text="Burp Proxy (optional, e.g. http://127.0.0.1:8080)").pack(pady=5)
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         ttk.Entry(settings_window, textvariable=self.burp_proxy).pack(pady=5, fill="x", padx=16)
@@ -480,6 +532,10 @@ class CombinedParserGUI(RunnerMixin):
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
+        self.autosave_enabled.set(bool(self.autosave_enabled_setting.get()))
+        self.autosave_interval_minutes.set(max(1, int(self.autosave_interval_setting.get() or 2)))
+        config['autosave_enabled'] = bool(self.autosave_enabled.get())
+        config['autosave_interval_minutes'] = int(self.autosave_interval_minutes.get())
         logger.set_debug(bool(config.get('debug_logging', False)))
         save_config()
         messagebox.showinfo("Settings", "Settings saved.")
@@ -580,6 +636,212 @@ class CombinedParserGUI(RunnerMixin):
 
     def clear_log(self):
         self.log.delete("1.0", tk.END)
+
+    def _current_filter_state(self):
+        return {
+            "min_combos": self.min_combos_var.get() if hasattr(self, "min_combos_var") else "0",
+            "status": self.status_filter_var.get() if hasattr(self, "status_filter_var") else "All",
+            "min_hits": self.min_hits_var.get() if hasattr(self, "min_hits_var") else "0",
+            "last_run": self.last_run_filter_var.get() if hasattr(self, "last_run_filter_var") else "All",
+        }
+
+    def _project_payload(self):
+        selected = [row.get("site") for row in self.runner_rows_all if row.get("selected")]
+        sort_state = {"column": self.runner_last_sort_col, "reverse": self.runner_sort_state.get(self.runner_last_sort_col, False) if self.runner_last_sort_col else False}
+        ui_state = {
+            "input_path": self.input_path.get(),
+            "output_path": self.output_path.get(),
+            "forms_output_path": self.forms_output_path.get(),
+            "headers": [self.header1.get(), self.header2.get(), self.header3.get()],
+        }
+        app_settings = {
+            "ignore_https_errors": bool(config.get("ignore_https_errors", False)),
+            "allow_nonstandard_ports": bool(config.get("allow_nonstandard_ports", False)),
+            "proxy_url": config.get("proxy_url", ""),
+            "autosave_enabled": self.autosave_enabled.get(),
+            "autosave_interval_minutes": self.autosave_interval_minutes.get(),
+        }
+        return build_project_payload(
+            project_name=self.current_project_name,
+            project_path=self.current_project_path,
+            created_ts=self.project_created_ts,
+            sites_db=self.sites_db,
+            filters=self._current_filter_state(),
+            sort_state=sort_state,
+            selection=selected,
+            ui_state=ui_state,
+            app_settings=app_settings,
+        )
+
+    def _autosave_now(self):
+        if not self.autosave_enabled.get() or not self.current_project_path:
+            return
+        try:
+            atomic_write_json(self.current_project_path, self._project_payload())
+            self.status_text.set(f"Autosaved project: {Path(self.current_project_path).name}")
+        except Exception as exc:
+            self._write_log_threadsafe(f"Autosave failed: {exc}")
+
+    def request_autosave(self):
+        if self.autosave_enabled.get() and self.current_project_path:
+            self.autosave_worker.request()
+
+    def _schedule_autosave_tick(self):
+        mins = max(1, int(self.autosave_interval_minutes.get() or 2))
+        self.root.after(mins * 60 * 1000, self._autosave_periodic)
+
+    def _autosave_periodic(self):
+        self.request_autosave()
+        self._schedule_autosave_tick()
+
+    def new_project(self):
+        self.current_project_path = None
+        self.current_project_name = "Untitled"
+        self.project_created_ts = utc_now_iso()
+        self.project_label_var.set("Project: Untitled")
+
+    def save_project(self, as_new=False):
+        if as_new or not self.current_project_path:
+            fp = filedialog.asksaveasfilename(defaultextension=".pproj", filetypes=[("ParserPro Project", "*.pproj *.parserproproj.json")])
+            if not fp:
+                return
+            self.current_project_path = fp
+            self.current_project_name = Path(fp).stem
+        payload = self._project_payload()
+        atomic_write_json(self.current_project_path, payload)
+        self.project_label_var.set(f"Project: {self.current_project_name}")
+        self.status_text.set(f"Saved project: {Path(self.current_project_path).name}")
+
+    def open_project(self):
+        fp = filedialog.askopenfilename(filetypes=[("ParserPro Project", "*.pproj *.parserproproj.json"), ("JSON", "*.json")])
+        if not fp:
+            return
+        raw = json.loads(Path(fp).read_text(encoding="utf-8"))
+        proj = load_project_payload(raw)
+        self.current_project_path = fp
+        self.current_project_name = proj.get("project_name") or Path(fp).stem
+        self.project_created_ts = proj.get("created_ts")
+        self.project_label_var.set(f"Project: {self.current_project_name}")
+        ui_state = proj.get("ui_state") or {}
+        self.input_path.set(ui_state.get("input_path", ""))
+        self.output_path.set(ui_state.get("output_path", ""))
+        self.forms_output_path.set(ui_state.get("forms_output_path", ""))
+        headers = ui_state.get("headers") or ["site", "user", "pass"]
+        if len(headers) >= 3:
+            self.header1.set(headers[0]); self.header2.set(headers[1]); self.header3.set(headers[2])
+
+        self.sites_db = proj.get("results") or {}
+        self.processed_data = self.sites_db
+        self.save_processed_data()
+        self.refresh_troubleshooting_panel()
+        self.request_autosave()
+
+        filters = proj.get("ui_filters") or {}
+        if hasattr(self, "min_combos_var"):
+            self.min_combos_var.set(filters.get("min_combos", "0"))
+            self.status_filter_var.set(filters.get("status", "All"))
+            self.min_hits_var.set(filters.get("min_hits", "0"))
+            self.last_run_filter_var.set(filters.get("last_run", "All"))
+
+        session_settings = proj.get("session_settings") or {}
+        self.autosave_enabled.set(bool(session_settings.get("autosave_enabled", True)))
+        self.autosave_interval_minutes.set(int(session_settings.get("autosave_interval_minutes", 2)))
+        self.refresh_runner_list()
+        self.refresh_troubleshooting_panel()
+        self.status_text.set(f"Opened project: {Path(fp).name}")
+
+    def _rows_for_export(self, filtered=False):
+        if filtered and self.runner_rows_view:
+            db = {r["site"]: self.sites_db.get(r["site"], {}) for r in self.runner_rows_view}
+        else:
+            db = self.sites_db
+        return site_report_rows(db)
+
+    def export_report_json(self):
+        filtered = messagebox.askyesno("Export Scope", "Export filtered view only?")
+        fp = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not fp:
+            return
+        rows = self._rows_for_export(filtered=filtered)
+        export_rows_json(fp, project_meta={"name": self.current_project_name, "path": self.current_project_path}, rows=rows, summary=summarize_status_counts(rows))
+        self.status_text.set(f"Exported JSON report: {Path(fp).name}")
+
+    def export_report_csv(self):
+        filtered = messagebox.askyesno("Export Scope", "Export filtered view only?")
+        fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not fp:
+            return
+        export_rows_csv(fp, self._rows_for_export(filtered=filtered))
+        self.status_text.set(f"Exported CSV report: {Path(fp).name}")
+
+    def on_exit(self):
+        self.request_autosave()
+        self.autosave_worker.stop()
+        self.root.destroy()
+
+    def build_troubleshooting_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        controls = ttk.Frame(tab, padding=12)
+        controls.grid(row=0, column=0, sticky="ew")
+        ttk.Button(controls, text="Refresh", command=self.refresh_troubleshooting_panel).pack(side="left", padx=4)
+        ttk.Button(controls, text="Retry Failed", command=self.retry_failed).pack(side="left", padx=4)
+        ttk.Button(controls, text="Export Diagnostics CSV", command=self.export_diagnostics_csv).pack(side="left", padx=4)
+
+        self.diag_summary = tk.Text(tab, height=8, wrap="word")
+        self.diag_summary.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+
+        cols = ("Site", "Error", "Hint", "Last Checked")
+        self.diag_tree = ttk.Treeview(tab, columns=cols, show="headings", height=10)
+        for c in cols:
+            self.diag_tree.heading(c, text=c)
+            self.diag_tree.column(c, width=180, anchor="w")
+        self.diag_tree.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        tab.rowconfigure(2, weight=2)
+        ttk.Button(tab, text="Copy URL", command=self.copy_diag_url).grid(row=3, column=0, sticky="e", padx=12, pady=(0, 12))
+
+    def refresh_troubleshooting_panel(self):
+        if not hasattr(self, "diag_summary"):
+            return
+        summary = diagnostics_summary(self.sites_db)
+        action_text = {
+            "DNS failures": "check hostname and DNS/VPN settings",
+            "Proxy failures": "verify proxy port is reachable or disable proxy mode",
+            "TLS failures": "try without proxy; check HTTPS inspection; ignore_https_errors only for debugging",
+            "Connection closed": "service may not be a web endpoint or closed unexpectedly",
+            "Other fetch failures": "review logs for stack/error detail",
+        }
+        lines = []
+        self.diag_tree.delete(*self.diag_tree.get_children())
+        for category, entries in summary.items():
+            lines.append(f"{category}: {len(entries)}")
+            tops = ", ".join([f"{d} ({n})" for d, n in top_failing_domains(entries)])
+            if tops:
+                lines.append(f"  Top domains: {tops}")
+            lines.append(f"  Recommendation: {action_text.get(category, 'review diagnostics')}")
+            for site, entry in entries:
+                self.diag_tree.insert("", "end", iid=site, values=(site, entry.get("last_error_code", ""), entry.get("last_error_hint", ""), entry.get("last_checked_ts", "")))
+        self.diag_summary.delete("1.0", tk.END)
+        self.diag_summary.insert(tk.END, "\n".join(lines) if lines else "No failures recorded.")
+
+    def copy_diag_url(self):
+        sel = self.diag_tree.selection()
+        if not sel:
+            return
+        site = sel[0]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(site)
+
+    def export_diagnostics_csv(self):
+        fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not fp:
+            return
+        rows = []
+        for item in self.diag_tree.get_children():
+            vals = self.diag_tree.item(item, "values")
+            rows.append({"site_url": vals[0], "error_code": vals[1], "error_hint": vals[2], "last_checked_ts": vals[3], "status": "fetch_failed", "confidence": "", "action_url": "", "method": "", "user_field": "", "pass_field": "", "submit_mode": "unknown"})
+        export_rows_csv(fp, rows)
+        self.status_text.set(f"Exported diagnostics CSV: {Path(fp).name}")
 
     def start_pipeline(self):
         if self.processing_thread and self.processing_thread.is_alive():
@@ -692,6 +954,8 @@ class CombinedParserGUI(RunnerMixin):
             if cli_path and self._windows_nordvpn_supported(cli_path):
                 subprocess.run([cli_path, "disconnect"], capture_output=True)
         self.save_processed_data()
+        self.refresh_troubleshooting_panel()
+        self.request_autosave()
 
     def wait_if_paused_or_cancelled(self):
         while self.pause_event.is_set() and not self.cancel_event.is_set():
@@ -794,6 +1058,8 @@ class CombinedParserGUI(RunnerMixin):
                     self.processed_data[base]["combo_path"] = str(combo_path.resolve())
 
             self.save_processed_data()
+            self.refresh_troubleshooting_panel()
+            self.request_autosave()
 
             proxy_candidate = None
             if get_vpn_control(config) == "nordvpn":
@@ -964,6 +1230,8 @@ class CombinedParserGUI(RunnerMixin):
 
                 self._write_log_threadsafe("Updated processed_sites.json")
                 self.save_processed_data()
+                self.refresh_troubleshooting_panel()
+                self.request_autosave()
 
             self.cleanup_after_pipeline("Pipeline complete! Check per-site files and hydra_forms.csv")
 
