@@ -8,7 +8,7 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-from config import config
+from config import config, normalize_proxy
 from helpers import USER_AGENTS
 
 try:
@@ -42,8 +42,9 @@ def fetch_page_playwright(url, proxy=None):
     for attempt in range(2):
         try:
             launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
-            if proxy:
-                launch_args["proxy"] = proxy
+            proxy_cfg = normalize_proxy(proxy)
+            if proxy_cfg:
+                launch_args["proxy"] = {"server": proxy_cfg["server"]}
 
             with sync_playwright() as p:
                 browser = p.chromium.launch(**launch_args)
@@ -88,8 +89,9 @@ def fetch_page_selenium(url, proxy=None):
         options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        if proxy and proxy.get("server"):
-            options.add_argument(f"--proxy-server={proxy['server']}")
+        proxy_cfg = normalize_proxy(proxy)
+        if proxy_cfg and proxy_cfg.get("server"):
+            options.add_argument(f"--proxy-server={proxy_cfg['server']}")
         driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
         driver.get(url)
         time.sleep(5)

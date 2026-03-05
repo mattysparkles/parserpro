@@ -484,32 +484,32 @@ class CombinedParserGUI:
     def _show_progress_threadsafe(self, show):
         self.root.after(0, lambda: self.progress.pack(fill="x", pady=8) if show else self.progress.pack_forget())
 
-   def _build_ui(self):
-    notebook = ttk.Notebook(self.root)
-    self.notebook = notebook
-    notebook.pack(fill="both", expand=True)
+    def _build_ui(self):
+        notebook = ttk.Notebook(self.root)
+        self.notebook = notebook
+        notebook.pack(fill="both", expand=True)
 
-    extractor_tab = ttk.Frame(notebook)
-    notebook.add(extractor_tab, text="Extractor")
+        extractor_tab = ttk.Frame(notebook)
+        notebook.add(extractor_tab, text="Extractor")
 
-    runner_tab = ttk.Frame(notebook)
-    notebook.add(runner_tab, text="Hydra Runner")
+        runner_tab = ttk.Frame(notebook)
+        notebook.add(runner_tab, text="Hydra Runner")
 
-    self.build_extractor_tab(extractor_tab)
-    self.build_runner_tab(runner_tab)
+        self.build_extractor_tab(extractor_tab)
+        self.build_runner_tab(runner_tab)
 
-    # Auto-refresh runner list when switching to Hydra Runner tab
-    def on_tab_changed(event):
-        selected_tab = notebook.select()
-        # Runner tab is the second tab (index 1)
-        if selected_tab == notebook.tabs()[1]:
-            try:
-                self.refresh_runner_list()
-            except AttributeError:
-                # Safety: if runner_tree not ready yet, skip silently
-                pass
+        # Auto-refresh runner list when switching to Hydra Runner tab
+        def on_tab_changed(event):
+            selected_tab = notebook.select()
+            # Runner tab is the second tab (index 1)
+            if selected_tab == notebook.tabs()[1]:
+                try:
+                    self.refresh_runner_list()
+                except AttributeError:
+                    # Safety: if runner_tree not ready yet, skip silently
+                    pass
 
-    notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
+        notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
     
     def build_extractor_tab(self, tab):
         main = ttk.Frame(tab, padding=12)

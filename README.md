@@ -57,6 +57,13 @@ Then launch:
 python main.py
 ```
 
+Smoke check:
+
+```bash
+python -m compileall .
+python main.py
+```
+
 ## How the pipeline works
 
 1. **Load input** (single file or folder of `.txt` files).
@@ -94,10 +101,19 @@ When Burp proxy is configured, extraction fetchers are routed through it and run
 
 - `combined.csv` (name user-defined)
 - `hydra_forms.csv` (name user-defined)
-- `<site>.txt` per-site combos
-- `hits_<site>.txt` Hydra positive hits
-- `processed_sites.json` run metadata
-- `config.json` settings
+- `data/<site>.txt` per-site combos
+- `data/hits_<site>.txt` runner output hits
+- `data/processed_sites.json` run metadata
+- `data/config.json` settings
+
+## CHANGELOG (modularization stabilization)
+
+- Fixed modular syntax/import regressions so modules compile cleanly.
+- Added central `DATA_DIR` path handling in `config.py` and migrated settings loading to `data/config.json` with one-time legacy root config migration.
+- Moved runtime artifacts (`processed_sites.json`, combo files, hits files, `gost.exe`) under `data/` to avoid current-working-directory dependence.
+- Saved absolute combo paths in processed metadata and updated runner fallback behavior/logging when combo files are missing.
+- Normalized proxy handling across GUI/fetcher layers for both Playwright and Selenium usage.
+- Resolved relative form `action` URLs against the page URL during extraction while keeping strict POST validation.
 
 ## Notes on modularization
 

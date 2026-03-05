@@ -11,7 +11,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from config import GOST_EXE, config, download_gost, save_config
+from config import DATA_DIR, GOST_EXE, PROCESSED_SITES_FILE, config, download_gost, normalize_proxy, save_config
 from extract import extract_login_form
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, normalize_site, split_three_fields
 from runner import RunnerMixin
@@ -46,7 +46,7 @@ class CombinedParserGUI(RunnerMixin):
         self.pipeline_cancelled = False
         self.gost_process = None
 
-        self.processed_file = Path("processed_sites.json")
+        self.processed_file = PROCESSED_SITES_FILE
         self.processed_data = self.load_processed_data()
 
         self.runner_tree = None
@@ -461,7 +461,7 @@ class CombinedParserGUI(RunnerMixin):
 
             if self.create_combo.get():
                 for base, combos_set in site_combos.items():
-                    combo_path = out_path.parent / get_site_filename(base)
+                    combo_path = DATA_DIR / get_site_filename(base)
                     existing = set()
                     if combo_path.exists():
                         with combo_path.open("r", encoding="utf-8") as f:
@@ -473,13 +473,14 @@ class CombinedParserGUI(RunnerMixin):
                             f.flush()
                         self._write_log_threadsafe(f"Appended {len(new_unique)} new combos to {combo_path.name}")
                     self.processed_data.setdefault(base, {})["combo_count"] = len(existing) + len(new_unique)
+                    self.processed_data[base]["combo_path"] = str(combo_path.resolve())
 
             self.save_processed_data()
 
-            proxy = self.setup_nordvpn_proxy() if self.use_proxy.get() else None
+            proxy = normalize_proxy(self.setup_nordvpn_proxy()) if self.use_proxy.get() else None
             burp_server = config.get("burp_proxy", "").strip()
             if burp_server:
-                proxy = {"server": burp_server}
+                proxy = normalize_proxy(burp_server)
                 self._write_log_threadsafe(f"Using Burp proxy for extraction: {burp_server}")
 
             if self.extract_forms.get() and site_combos:
@@ -564,7 +565,8 @@ class CombinedParserGUI(RunnerMixin):
                                     'form_found': True,
                                     'failed_urls': [],
                                     'combo_count': self.processed_data.get(base, {}).get('combo_count', 0),
-                                    'hydra_command_template': form.get('hydra_command_template', '')
+                                    'hydra_command_template': form.get('hydra_command_template', ''),
+                                    'combo_path': self.processed_data.get(base, {}).get('combo_path', '')
                                 }
                             else:
                                 self.processed_data.setdefault(base, {})

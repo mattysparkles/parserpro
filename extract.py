@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 try:
     from bs4 import BeautifulSoup
@@ -138,11 +138,10 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     if not best_form:
         return None, f"no_valid_form (best confidence: {best_confidence})"
 
-    action = best_form.get("action", "/")
-    if action.startswith("/"):
-        action = action
-    elif not action:
-        action = "/"
+    action = (best_form.get("action") or "").strip()
+    if not action:
+        action = url
+    action = urljoin(url, action)
 
     if best_form.get("method", "post").lower() != "post":
         return None, "non_post_form_selected"
