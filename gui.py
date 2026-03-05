@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -240,6 +241,10 @@ class CombinedParserGUI(RunnerMixin):
                 self._write_log_threadsafe("No NordVPN token set - using no proxy")
                 return None
 
+            if not shutil.which("nordvpn"):
+                self._write_log_threadsafe("NordVPN CLI not found in PATH - using no proxy")
+                return None
+
             self._write_log_threadsafe("Setting up NordVPN + SOCKS5 proxy...")
 
             subprocess.run(["nordvpn", "login", "--token", config['nord_token']], capture_output=True)
@@ -259,6 +264,8 @@ class CombinedParserGUI(RunnerMixin):
 
     def rotate_nordvpn(self):
         try:
+            if not shutil.which("nordvpn"):
+                return
             subprocess.run(["nordvpn", "disconnect"], capture_output=True)
             subprocess.run(["nordvpn", "connect"], capture_output=True)
             self._write_log_threadsafe("Rotated NordVPN IP")
@@ -375,7 +382,8 @@ class CombinedParserGUI(RunnerMixin):
         if self.gost_process:
             self.gost_process.terminate()
             self.gost_process = None
-        subprocess.run(["nordvpn", "disconnect"], capture_output=True)
+        if shutil.which("nordvpn"):
+            subprocess.run(["nordvpn", "disconnect"], capture_output=True)
         self.save_processed_data()
 
     def process_pipeline(self, retry_failed_only=False):
