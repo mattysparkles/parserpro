@@ -21,7 +21,7 @@ def test_project_roundtrip(tmp_path):
     atomic_write_json(project_file, payload)
 
     loaded = load_project_payload(json.loads(Path(project_file).read_text(encoding="utf-8")))
-    assert loaded["schema_version"] == 2
+    assert loaded["schema_version"] == 3
     assert loaded["project_name"] == "Demo"
     assert loaded["ui_filters"]["status"] == "Failed"
     assert "https://example.com" in loaded["results"]
