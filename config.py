@@ -1,10 +1,14 @@
 import json
 import platform
+import socket
 import tarfile
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
+
+from helpers import log_once
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -39,6 +43,49 @@ def normalize_proxy(value):
             out = dict(value)
             out["server"] = server
             return out
+    return None
+
+
+def proxy_is_reachable(proxy_dict, timeout=1.0):
+    proxy_cfg = normalize_proxy(proxy_dict)
+    if not proxy_cfg:
+        return False
+
+    server = proxy_cfg.get("server", "")
+    parsed = urlparse(server if "://" in server else f"//{server}")
+    host = parsed.hostname
+    port = parsed.port
+    if not host or not port:
+        return False
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def get_effective_proxy(cfg, runtime_proxy=None):
+    configured_proxy = runtime_proxy
+    if configured_proxy is None:
+        configured_proxy = (
+            cfg.get("burp_proxy")
+            or cfg.get("socks_proxy")
+            or cfg.get("proxy")
+            or None
+        )
+
+    proxy_cfg = normalize_proxy(configured_proxy)
+    if not proxy_cfg:
+        return None
+
+    if proxy_is_reachable(proxy_cfg):
+        return proxy_cfg
+
+    log_once(
+        f"proxy-unreachable:{proxy_cfg.get('server', '')}",
+        "Proxy configured but unreachable; disabling proxy for this run",
+    )
     return None
 
 

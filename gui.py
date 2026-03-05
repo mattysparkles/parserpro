@@ -12,7 +12,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from config import DATA_DIR, GOST_EXE, PROCESSED_SITES_FILE, config, download_gost, normalize_proxy, save_config
+from config import DATA_DIR, GOST_EXE, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, save_config
 from extract import extract_login_form
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, normalize_site, split_three_fields
 from runner import RunnerMixin
@@ -240,10 +240,12 @@ class CombinedParserGUI(RunnerMixin):
         try:
             if not config.get('nord_token'):
                 self._write_log_threadsafe("No NordVPN token set - using no proxy")
+                self.proxy_url.set("")
                 return None
 
             if not shutil.which("nordvpn"):
                 self._write_log_threadsafe("NordVPN CLI not found in PATH - using no proxy")
+                self.proxy_url.set("")
                 return None
 
             self._write_log_threadsafe("Setting up NordVPN + SOCKS5 proxy...")
@@ -254,6 +256,7 @@ class CombinedParserGUI(RunnerMixin):
             gost_path = download_gost()
             if not gost_path:
                 self._write_log_threadsafe("gost unavailable; continuing without proxy")
+                self.proxy_url.set("")
                 return None
 
             self.gost_process = subprocess.Popen([str(gost_path), "-L=socks5://:1080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -264,6 +267,7 @@ class CombinedParserGUI(RunnerMixin):
 
         except Exception as e:
             self._write_log_threadsafe(f"NordVPN / gost setup failed: {e}. Falling back to no proxy.")
+            self.proxy_url.set("")
             return None
 
     def rotate_nordvpn(self):
@@ -489,11 +493,13 @@ class CombinedParserGUI(RunnerMixin):
 
             self.save_processed_data()
 
-            proxy = normalize_proxy(self.setup_nordvpn_proxy()) if self.use_proxy.get() else None
+            proxy_candidate = self.setup_nordvpn_proxy() if self.use_proxy.get() else None
             burp_server = config.get("burp_proxy", "").strip()
             if burp_server:
-                proxy = normalize_proxy(burp_server)
+                proxy_candidate = burp_server
                 self._write_log_threadsafe(f"Using Burp proxy for extraction: {burp_server}")
+
+            proxy = get_effective_proxy(config, proxy_candidate)
 
             if self.extract_forms.get() and site_combos:
                 site_list = []
