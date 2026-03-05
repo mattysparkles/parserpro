@@ -1,4 +1,5 @@
 import re
+import hashlib
 from urllib.parse import urlparse, urlunparse
 
 USER_AGENTS = [
@@ -53,8 +54,15 @@ def get_base_url(url):
 
 
 def get_site_filename(base_url):
-    domain = base_url.split("//")[-1].replace("www.", "").replace(".", "_")
-    return f"{domain}.txt"
+    domain = base_url.split("//")[-1].split("/")[0].strip().lower()
+    domain = domain.replace("www.", "")
+    safe_domain = re.sub(r"[^a-z0-9._-]", "_", domain).strip("._-")
+
+    if not safe_domain:
+        fallback = hashlib.sha1(base_url.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        safe_domain = f"site_{fallback}"
+
+    return f"{safe_domain}.txt"
 
 
 def split_three_fields(line):
