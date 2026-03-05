@@ -2,7 +2,6 @@ import sys
 import warnings
 
 import tkinter as tk
-from tkinter import ttk
 
 try:
     from urllib3.exceptions import InsecureRequestWarning
@@ -23,11 +22,6 @@ if sys.platform == "win32":
 
 def main():
     root = tk.Tk()
-    try:
-        style = ttk.Style()
-        style.theme_use("clam")
-    except Exception:
-        pass
     CombinedParserGUI(root)
     root.mainloop()
 

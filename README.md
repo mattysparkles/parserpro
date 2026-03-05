@@ -78,6 +78,21 @@ Depending on enabled features you may also need:
 - Chromium/Chrome runtime compatible with Playwright/Selenium
 
 
+
+## UI refresh (2026 usability pass)
+
+- Added vertical + horizontal scrollbars to long-content widgets in both tabs:
+  - Extractor log
+  - Runner results table
+  - Runner log
+- Mouse wheel scrolling now supports platform-specific behavior, including `Shift+Wheel` for horizontal scrolling.
+- Runner tab now uses an adjustable split pane so you can resize table/log space interactively.
+- Layout was updated for better resizing at common laptop resolutions (including 1280x720).
+
+**Resize tips**
+- Drag the divider in the Runner tab to allocate more room to the results table or the runner log.
+- Widen the app window to view more Treeview columns; use the horizontal scrollbar for overflow.
+
 ## Runner tab UX controls
 
 The **Hydra Runner** tab now behaves like a generic command orchestrator with explicit row controls:
