@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,12 +27,14 @@ from project_io import (
     diagnostics_summary,
     export_rows_csv,
     export_rows_json,
+    export_timeline_csv,
     load_project_payload,
     site_report_rows,
     summarize_status_counts,
     top_failing_domains,
     utc_now_iso,
 )
+from timeline import in_time_window, make_event, normalize_event, parse_ts
 
 
 def apply_theme(root):
@@ -92,6 +95,14 @@ class CombinedParserGUI(RunnerMixin):
         self._main_thread = threading.current_thread()
         self.gost_process = None
 
+        self.timeline_events = []
+        self.timeline_sort_state = {"column": "Time", "reverse": True}
+        self.timeline_row_ids = {}
+        self.timeline_coalesce = defaultdict(list)
+        self.timeline_coalesce_last_summary = {}
+        self.timeline_fetch_failures = deque()
+        self.timeline_last_fetch_burst_ts = 0.0
+
         self.processed_file = PROCESSED_SITES_FILE
         self.processed_data = self.load_processed_data()
         self.sites_db = self.processed_data
@@ -126,16 +137,59 @@ class CombinedParserGUI(RunnerMixin):
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
 
     def load_processed_data(self):
+        legacy_file = Path(__file__).resolve().parent / "processed_sites.json"
+        if legacy_file.exists() and not self.processed_file.exists():
+            try:
+                shutil.copy2(legacy_file, self.processed_file)
+                migrated_count = len(json.loads(self.processed_file.read_text(encoding="utf-8")) or {})
+                self.record_event("INFO", "cache", "migrate", "Cache migrated (root -> DATA_DIR)", {"site_count": migrated_count})
+            except Exception:
+                pass
+
         if self.processed_file.exists():
             try:
                 raw = json.loads(self.processed_file.read_text(encoding='utf-8'))
-                return self._migrate_processed_schema(raw)
-            except:
+                migrated = self._migrate_processed_schema(raw)
+                self.record_event("INFO", "cache", "load", "Cache loaded", {"site_count": len(migrated)})
+                return migrated
+            except Exception:
                 return {}
         return {}
 
     def save_processed_data(self):
         self.processed_file.write_text(json.dumps(self.processed_data, indent=2), encoding='utf-8')
+
+    def record_event(self, level, category, action, message, metrics=None, allow_coalesce=True):
+        event = make_event(level, category, action, message, metrics=metrics)
+        self.timeline_events.append(event)
+        if allow_coalesce and event["level"] in {"WARN", "ERROR"}:
+            self._record_coalesced_summary(event)
+        if hasattr(self, "timeline_tree"):
+            self.refresh_timeline_view()
+
+    def _record_coalesced_summary(self, event):
+        key = (event.get("category"), event.get("action"), event.get("level"))
+        now = time.time()
+        bucket = [ts for ts in self.timeline_coalesce.get(key, []) if now - ts <= 300]
+        bucket.append(now)
+        self.timeline_coalesce[key] = bucket
+        last_summary = self.timeline_coalesce_last_summary.get(key, 0.0)
+        if len(bucket) >= 6 and (now - last_summary) >= 60:
+            self.record_event(
+                "WARN",
+                event.get("category", "network"),
+                "summary",
+                f"{event.get('action')} x{len(bucket)} in last 5m",
+                metrics={"count": len(bucket), "window_minutes": 5},
+                allow_coalesce=False,
+            )
+            self.timeline_coalesce_last_summary[key] = now
+            self.timeline_coalesce[key] = []
+
+    def _timeline_known_categories(self):
+        default = ["project", "run", "ui", "network", "cache", "export", "proxy", "dns", "tls"]
+        observed = sorted({str((e or {}).get("category") or "") for e in self.timeline_events if (e or {}).get("category")})
+        return ["All"] + sorted(set(default + observed))
 
     def _build_menu(self):
         menu_bar = tk.Menu(self.root)
@@ -147,6 +201,7 @@ class CombinedParserGUI(RunnerMixin):
         export_menu = tk.Menu(file_menu, tearoff=0)
         export_menu.add_command(label="JSON", command=self.export_report_json)
         export_menu.add_command(label="CSV", command=self.export_report_csv)
+        export_menu.add_command(label="Timeline CSV", command=self.export_timeline_csv)
         file_menu.add_cascade(label="Export", menu=export_menu)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_exit)
@@ -292,9 +347,13 @@ class CombinedParserGUI(RunnerMixin):
         troubleshooting_tab = ttk.Frame(notebook)
         notebook.add(troubleshooting_tab, text="Troubleshooting")
 
+        timeline_tab = ttk.Frame(notebook)
+        notebook.add(timeline_tab, text="Timeline")
+
         self.build_extractor_tab(extractor_tab)
         self.build_runner_tab(runner_tab)
         self.build_troubleshooting_tab(troubleshooting_tab)
+        self.build_timeline_tab(timeline_tab)
 
         status_bar = ttk.Frame(container, padding=(8, 4))
         status_bar.grid(row=1, column=0, sticky="ew")
@@ -671,6 +730,7 @@ class CombinedParserGUI(RunnerMixin):
             selection=selected,
             ui_state=ui_state,
             app_settings=app_settings,
+            timeline_events=self.timeline_events,
         )
 
     def _autosave_now(self):
@@ -678,6 +738,7 @@ class CombinedParserGUI(RunnerMixin):
             return
         try:
             atomic_write_json(self.current_project_path, self._project_payload())
+            self.record_event("INFO", "project", "autosave", "Project autosaved", {"path": self.current_project_path})
             self.status_text.set(f"Autosaved project: {Path(self.current_project_path).name}")
         except Exception as exc:
             self._write_log_threadsafe(f"Autosave failed: {exc}")
@@ -699,6 +760,7 @@ class CombinedParserGUI(RunnerMixin):
         self.current_project_name = "Untitled"
         self.project_created_ts = utc_now_iso()
         self.project_label_var.set("Project: Untitled")
+        self.record_event("INFO", "project", "start", "New project created")
 
     def save_project(self, as_new=False):
         if as_new or not self.current_project_path:
@@ -710,6 +772,7 @@ class CombinedParserGUI(RunnerMixin):
         payload = self._project_payload()
         atomic_write_json(self.current_project_path, payload)
         self.project_label_var.set(f"Project: {self.current_project_name}")
+        self.record_event("INFO", "project", "save", "Project saved", {"path": self.current_project_path})
         self.status_text.set(f"Saved project: {Path(self.current_project_path).name}")
 
     def open_project(self):
@@ -732,6 +795,7 @@ class CombinedParserGUI(RunnerMixin):
 
         self.sites_db = proj.get("results") or {}
         self.processed_data = self.sites_db
+        self.timeline_events = [normalize_event(ev) for ev in (proj.get("timeline_events") or [])]
         self.save_processed_data()
         self.refresh_troubleshooting_panel()
         self.request_autosave()
@@ -748,6 +812,8 @@ class CombinedParserGUI(RunnerMixin):
         self.autosave_interval_minutes.set(int(session_settings.get("autosave_interval_minutes", 2)))
         self.refresh_runner_list()
         self.refresh_troubleshooting_panel()
+        self.refresh_timeline_view()
+        self.record_event("INFO", "project", "load", "Project opened", {"path": fp})
         self.status_text.set(f"Opened project: {Path(fp).name}")
 
     def _rows_for_export(self, filtered=False):
@@ -763,7 +829,10 @@ class CombinedParserGUI(RunnerMixin):
         if not fp:
             return
         rows = self._rows_for_export(filtered=filtered)
-        export_rows_json(fp, project_meta={"name": self.current_project_name, "path": self.current_project_path}, rows=rows, summary=summarize_status_counts(rows))
+        include_timeline = messagebox.askyesno("Timeline", "Include timeline in JSON export?")
+        timeline = self._filtered_timeline_events() if include_timeline else None
+        export_rows_json(fp, project_meta={"name": self.current_project_name, "path": self.current_project_path}, rows=rows, summary=summarize_status_counts(rows), timeline_events=timeline)
+        self.record_event("INFO", "export", "export", "JSON export created", {"record_count": len(rows), "include_timeline": bool(include_timeline)})
         self.status_text.set(f"Exported JSON report: {Path(fp).name}")
 
     def export_report_csv(self):
@@ -771,8 +840,141 @@ class CombinedParserGUI(RunnerMixin):
         fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if not fp:
             return
-        export_rows_csv(fp, self._rows_for_export(filtered=filtered))
+        rows = self._rows_for_export(filtered=filtered)
+        export_rows_csv(fp, rows)
+        self.record_event("INFO", "export", "export", "CSV export created", {"record_count": len(rows)})
         self.status_text.set(f"Exported CSV report: {Path(fp).name}")
+
+    def build_timeline_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+
+        controls = ttk.Frame(tab, padding=8)
+        controls.grid(row=0, column=0, sticky="ew")
+        ttk.Label(controls, text="Level").pack(side="left")
+        self.timeline_level_var = tk.StringVar(value="All")
+        ttk.Combobox(controls, textvariable=self.timeline_level_var, values=["All", "INFO", "WARN", "ERROR"], width=8, state="readonly").pack(side="left", padx=4)
+        ttk.Label(controls, text="Category").pack(side="left", padx=(8, 0))
+        self.timeline_category_var = tk.StringVar(value="All")
+        self.timeline_category_combo = ttk.Combobox(controls, textvariable=self.timeline_category_var, values=self._timeline_known_categories(), width=12, state="readonly")
+        self.timeline_category_combo.pack(side="left", padx=4)
+        ttk.Label(controls, text="Range").pack(side="left", padx=(8, 0))
+        self.timeline_range_var = tk.StringVar(value="All")
+        ttk.Combobox(controls, textvariable=self.timeline_range_var, values=["All", "Last 10m", "Last hour", "Today"], width=10, state="readonly").pack(side="left", padx=4)
+        ttk.Label(controls, text="Search").pack(side="left", padx=(8, 0))
+        self.timeline_search_var = tk.StringVar(value="")
+        ttk.Entry(controls, textvariable=self.timeline_search_var, width=28).pack(side="left", padx=4)
+        ttk.Button(controls, text="Apply", command=self.refresh_timeline_view).pack(side="left", padx=4)
+        ttk.Button(controls, text="Clear Timeline", command=self.clear_timeline).pack(side="right", padx=4)
+
+        self.timeline_canvas = tk.Canvas(tab, height=70, bg="white", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.timeline_canvas.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+
+        cols = ("Time", "Level", "Category", "Action", "Message")
+        self.timeline_tree = ttk.Treeview(tab, columns=cols, show="headings")
+        for col in cols:
+            self.timeline_tree.heading(col, text=col, command=lambda c=col: self.sort_timeline_by(c))
+            self.timeline_tree.column(col, anchor="w", width=170 if col != "Message" else 520)
+        self.timeline_tree.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.timeline_tree.bind("<ButtonRelease-1>", lambda _e: self.on_timeline_row_selected())
+        self.refresh_timeline_view()
+
+    def clear_timeline(self):
+        if not messagebox.askyesno("Clear Timeline", "Clear timeline events only?"):
+            return
+        self.timeline_events = []
+        self.timeline_row_ids = {}
+        self.refresh_timeline_view()
+        self.record_event("INFO", "ui", "clear", "Timeline cleared")
+
+    def _filtered_timeline_events(self):
+        level = self.timeline_level_var.get() if hasattr(self, "timeline_level_var") else "All"
+        category = self.timeline_category_var.get() if hasattr(self, "timeline_category_var") else "All"
+        range_key = self.timeline_range_var.get() if hasattr(self, "timeline_range_var") else "All"
+        query = (self.timeline_search_var.get() if hasattr(self, "timeline_search_var") else "").strip().lower()
+        events = []
+        for event in self.timeline_events:
+            if level != "All" and event.get("level") != level:
+                continue
+            if category != "All" and event.get("category") != category:
+                continue
+            if not in_time_window(event.get("ts", ""), range_key):
+                continue
+            if query and query not in str(event.get("message", "")).lower():
+                continue
+            events.append(event)
+        return events
+
+    def refresh_timeline_view(self):
+        if not hasattr(self, "timeline_tree"):
+            return
+        self.timeline_category_combo.configure(values=self._timeline_known_categories())
+        events = self._filtered_timeline_events()
+        sort_col = self.timeline_sort_state.get("column", "Time")
+        reverse = bool(self.timeline_sort_state.get("reverse", True))
+        key_map = {"Time": "ts", "Level": "level", "Category": "category", "Action": "action", "Message": "message"}
+        field = key_map.get(sort_col, "ts")
+        if field == "ts":
+            events.sort(key=lambda e: parse_ts(e.get("ts")) or datetime.min, reverse=reverse)
+        else:
+            events.sort(key=lambda e: str(e.get(field) or "").lower(), reverse=reverse)
+
+        self.timeline_tree.delete(*self.timeline_tree.get_children())
+        self.timeline_row_ids = {}
+        for event in events:
+            iid = event.get("event_id")
+            self.timeline_row_ids[iid] = iid
+            self.timeline_tree.insert("", "end", iid=iid, values=(event.get("ts", ""), event.get("level", ""), event.get("category", ""), event.get("action", ""), event.get("message", "")))
+        self.draw_timeline_canvas(events)
+
+    def sort_timeline_by(self, col):
+        reverse = self.timeline_sort_state.get("column") == col and not self.timeline_sort_state.get("reverse", False)
+        self.timeline_sort_state = {"column": col, "reverse": reverse}
+        self.refresh_timeline_view()
+
+    def draw_timeline_canvas(self, events):
+        if not hasattr(self, "timeline_canvas"):
+            return
+        canvas = self.timeline_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 200)
+        height = max(canvas.winfo_height(), 70)
+        if not events:
+            canvas.create_text(8, height // 2, anchor="w", text="No timeline events")
+            return
+        times = [parse_ts(e.get("ts")) for e in events]
+        times = [t for t in times if t]
+        if not times:
+            return
+        start, end = min(times), max(times)
+        span = max((end - start).total_seconds(), 1)
+        canvas.create_line(20, height // 2, width - 20, height // 2)
+        for i in range(6):
+            x = 20 + (width - 40) * (i / 5)
+            canvas.create_line(x, (height // 2) - 6, x, (height // 2) + 6)
+        for event in events:
+            ts = parse_ts(event.get("ts"))
+            if not ts:
+                continue
+            x = 20 + ((ts - start).total_seconds() / span) * (width - 40)
+            marker = canvas.create_oval(x - 4, (height // 2) - 4, x + 4, (height // 2) + 4, fill="black")
+            canvas.tag_bind(marker, "<Button-1>", lambda _e, eid=event.get("event_id"): self.select_timeline_event(eid))
+
+    def select_timeline_event(self, event_id):
+        if event_id in self.timeline_row_ids:
+            self.timeline_tree.selection_set(event_id)
+            self.timeline_tree.see(event_id)
+
+    def on_timeline_row_selected(self):
+        pass
+
+    def export_timeline_csv(self):
+        fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not fp:
+            return
+        export_timeline_csv(fp, self._filtered_timeline_events())
+        self.record_event("INFO", "export", "export", "Timeline CSV exported", {"event_count": len(self._filtered_timeline_events())})
+        self.status_text.set(f"Exported timeline CSV: {Path(fp).name}")
 
     def on_exit(self):
         self.request_autosave()
@@ -860,6 +1062,7 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="disabled")
         self.status_text.set("Running...")
         self.state_text.set("Running")
+        self.record_event("INFO", "run", "start", "Extraction run started")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(False,))
         self.processing_thread.start()
@@ -881,6 +1084,7 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="disabled")
         self.status_text.set("Retrying failed sites...")
         self.state_text.set("Running")
+        self.record_event("INFO", "run", "retry_failed", "Retry failed run started")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(True,))
         self.processing_thread.start()
@@ -896,6 +1100,7 @@ class CombinedParserGUI(RunnerMixin):
             self.pause_button.config(text="Resume")
             self.status_text.set("Paused")
             self.state_text.set("Paused")
+            self.record_event("INFO", "run", "pause", "Run paused")
             log_once("pipeline-paused", "Pipeline/Runner paused; waiting before launching new work.")
         else:
             self.pause_event.clear()
@@ -903,6 +1108,7 @@ class CombinedParserGUI(RunnerMixin):
             self.pause_button.config(text="Pause")
             self.status_text.set("Running...")
             self.state_text.set("Running")
+            self.record_event("INFO", "run", "resume", "Run resumed")
 
     def cancel_pipeline(self):
         if not self.pipeline_running and not self.runner_running:
@@ -914,6 +1120,7 @@ class CombinedParserGUI(RunnerMixin):
         self.cancel_event.set()
         self.status_text.set("Cancelling...")
         self.state_text.set("Canceled")
+        self.record_event("WARN", "run", "cancel", "Run cancellation requested")
         self.cancel_button.config(state="disabled")
         log_once("cancel-requested", "Cancellation requested; stopping outstanding work.")
         self.terminate_active_runner_process()
@@ -944,6 +1151,12 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="normal")
         self.status_text.set(final_msg)
         self.state_text.set("Idle")
+        if "cancel" in final_msg.lower():
+            self.record_event("WARN", "run", "cancel", final_msg)
+        elif "failed" in final_msg.lower():
+            self.record_event("ERROR", "run", "complete", final_msg)
+        else:
+            self.record_event("INFO", "run", "complete", final_msg)
         messagebox.showinfo("Pipeline Status", final_msg)
 
         if self.gost_process:
@@ -1069,16 +1282,22 @@ class CombinedParserGUI(RunnerMixin):
                 self._write_log_threadsafe(f"Using configured proxy_url for extraction: {config.get('proxy_url', '').strip()}")
 
             proxy = get_effective_proxy(config, proxy_candidate)
+            if config.get("proxy_url", "").strip() and not proxy:
+                self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"proxy_url": config.get("proxy_url", "").strip()})
 
             if self.extract_forms.get() and site_combos:
                 site_list = []
+                cache_skipped = 0
                 for base in site_combos:
                     skip_reason = self._cache_skip_reason(base, retry_failed_only=retry_failed_only)
                     if skip_reason:
                         if skip_reason == "already cached":
                             self._write_log_threadsafe(f"{base} :: Skipped (already cached)")
+                        cache_skipped += 1
                         continue
                     site_list.append(base)
+                if cache_skipped:
+                    self.record_event("INFO", "cache", "load", "Used cached entries", {"skipped": cache_skipped})
 
                 if not site_list:
                     self._write_log_threadsafe("No sites need form extraction.")
@@ -1208,6 +1427,20 @@ class CombinedParserGUI(RunnerMixin):
                                 if self.show_debug_details.get() and stacktrace:
                                     extra += f" stack={stacktrace.splitlines()[-1]}"
                                 self._write_log_threadsafe(f"{base} :: status=fetch_failed confidence=0 reason={hint}{extra}")
+                                if code == "proxy_down":
+                                    self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"site": base})
+                                elif code == "dns_failed":
+                                    self.record_event("WARN", "dns", "failure", "DNS failure detected", {"site": base})
+                                elif code in {"tls_mismatch", "cert_invalid"}:
+                                    self.record_event("WARN", "tls", "failure", "TLS mismatch/certificate invalid", {"site": base, "error_code": code})
+
+                                now_ts = time.time()
+                                self.timeline_fetch_failures.append(now_ts)
+                                while self.timeline_fetch_failures and now_ts - self.timeline_fetch_failures[0] > 60:
+                                    self.timeline_fetch_failures.popleft()
+                                if len(self.timeline_fetch_failures) >= 20 and now_ts - self.timeline_last_fetch_burst_ts > 60:
+                                    self.timeline_last_fetch_burst_ts = now_ts
+                                    self.record_event("WARN", "network", "burst", "Fetch failure burst detected", {"failures": len(self.timeline_fetch_failures), "window_seconds": 60})
 
                             entry["combo_count"] = self.processed_data.get(base, {}).get('combo_count', 0)
                         except Exception as e:

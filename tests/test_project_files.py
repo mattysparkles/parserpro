@@ -16,11 +16,13 @@ def test_project_roundtrip(tmp_path):
         selection=["https://example.com"],
         ui_state={"input_path": "sites.txt"},
         app_settings={"autosave_enabled": True, "autosave_interval_minutes": 2},
+        timeline_events=[{"event_id": "1", "ts": "2026-01-01T00:00:00Z", "level": "INFO", "category": "project", "action": "save", "message": "saved", "metrics": {}}],
     )
     atomic_write_json(project_file, payload)
 
     loaded = load_project_payload(json.loads(Path(project_file).read_text(encoding="utf-8")))
-    assert loaded["schema_version"] == 1
+    assert loaded["schema_version"] == 2
     assert loaded["project_name"] == "Demo"
     assert loaded["ui_filters"]["status"] == "Failed"
     assert "https://example.com" in loaded["results"]
+    assert len(loaded["timeline_events"]) == 1

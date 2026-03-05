@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlparse
 
-PROJECT_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
 
 
 def utc_now_iso():
@@ -22,7 +22,7 @@ def atomic_write_json(path, payload):
     Path(temp_name).replace(target)
 
 
-def build_project_payload(*, project_name, project_path, created_ts, sites_db, filters, sort_state, selection, ui_state, app_settings):
+def build_project_payload(*, project_name, project_path, created_ts, sites_db, filters, sort_state, selection, ui_state, app_settings, timeline_events=None):
     return {
         "schema_version": PROJECT_SCHEMA_VERSION,
         "project_name": project_name or "Untitled",
@@ -36,6 +36,7 @@ def build_project_payload(*, project_name, project_path, created_ts, sites_db, f
         "table_sort": sort_state or {},
         "row_selection": selection or [],
         "results": sites_db or {},
+        "timeline_events": timeline_events or [],
         "ui_state": ui_state or {},
         "session_settings": {
             "ignore_https_errors": bool(app_settings.get("ignore_https_errors", False)),
@@ -60,6 +61,7 @@ def load_project_payload(payload):
         "table_sort": data.get("table_sort") or {},
         "row_selection": data.get("row_selection") or [],
         "results": data.get("results") or {},
+        "timeline_events": data.get("timeline_events") or [],
         "ui_state": data.get("ui_state") or {},
         "session_settings": data.get("session_settings") or {},
         "project_path": data.get("project_path", ""),
@@ -94,8 +96,22 @@ def site_report_rows(sites_db):
     return rows
 
 
-def export_rows_json(path, *, project_meta, rows, summary):
-    atomic_write_json(path, {"project": project_meta, "summary": summary, "entries": rows})
+def export_rows_json(path, *, project_meta, rows, summary, timeline_events=None):
+    payload = {"project": project_meta, "summary": summary, "entries": rows}
+    if timeline_events is not None:
+        payload["timeline_events"] = timeline_events
+    atomic_write_json(path, payload)
+
+
+def export_timeline_csv(path, events):
+    fieldnames = ["event_id", "ts", "level", "category", "action", "message", "metrics"]
+    with Path(path).open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
+        writer.writeheader()
+        for event in events or []:
+            row = dict(event)
+            row["metrics"] = json.dumps(row.get("metrics") or {}, ensure_ascii=False)
+            writer.writerow(row)
 
 
 def export_rows_csv(path, rows):
