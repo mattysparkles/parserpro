@@ -103,15 +103,19 @@ def solve_captcha(soup, url):
     captcha_type = None
     sitekey = None
 
-    if soup.find("div", {"class": "g-recaptcha"}):
+    recaptcha_div = soup.find("div", {"class": "g-recaptcha"})
+    hcaptcha_div = soup.find("div", {"class": "h-captcha"})
+    turnstile_div = soup.find("div", {"class": "cf-turnstile"})
+
+    if recaptcha_div:
         captcha_type = "recaptcha"
-        sitekey = soup.find("div", {"class": "g-recaptcha"})["data-sitekey"]
-    elif "hcaptcha" in str(soup).lower():
+        sitekey = recaptcha_div.get("data-sitekey")
+    elif "hcaptcha" in str(soup).lower() and hcaptcha_div:
         captcha_type = "hcaptcha"
-        sitekey = soup.find("div", {"class": "h-captcha"})["data-sitekey"]
-    elif "turnstile" in str(soup).lower():
+        sitekey = hcaptcha_div.get("data-sitekey")
+    elif "turnstile" in str(soup).lower() and turnstile_div:
         captcha_type = "turnstile"
-        sitekey = soup.find("div", {"class": "cf-turnstile"})["data-sitekey"]
+        sitekey = turnstile_div.get("data-sitekey")
 
     if not captcha_type or not sitekey:
         return None

@@ -10,6 +10,9 @@ from helpers import get_site_filename
 
 
 class RunnerMixin:
+    def _append_hydra_log_threadsafe(self, text):
+        self.root.after(0, lambda: self.hydra_log.insert(tk.END, text) or self.hydra_log.see(tk.END))
+
     def build_runner_tab(self, tab):
         frame = ttk.Frame(tab, padding=12)
         frame.pack(fill="both", expand=True)
@@ -79,9 +82,8 @@ class RunnerMixin:
             combo_file = get_site_filename(site)
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
 
-            self.hydra_log.insert(tk.END, f"\n=== Starting Hydra for {site} ===\n")
-            self.hydra_log.insert(tk.END, f"Command: {cmd}\n")
-            self.hydra_log.see(tk.END)
+            self._append_hydra_log_threadsafe(f"\n=== Starting Hydra for {site} ===\n")
+            self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
 
             try:
                 if os.system("wsl --version >nul 2>&1") == 0:
@@ -90,22 +92,20 @@ class RunnerMixin:
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
                 for line in iter(process.stdout.readline, ""):
-                    self.hydra_log.insert(tk.END, line)
-                    self.hydra_log.see(tk.END)
+                    self._append_hydra_log_threadsafe(line)
                     if "[DATA]" in line and "password" in line.lower():
                         with open(f"hits_{site.replace('.', '_')}.txt", "a", encoding="utf-8") as hf:
                             hf.write(line.strip() + "\n")
 
                 process.wait()
                 if process.returncode == 0:
-                    self.hydra_log.insert(tk.END, f"[SUCCESS] Hydra finished for {site}\n")
+                    self._append_hydra_log_threadsafe(f"[SUCCESS] Hydra finished for {site}\n")
                 else:
-                    self.hydra_log.insert(tk.END, f"[ERROR] Hydra exited with code {process.returncode} for {site}\n")
+                    self._append_hydra_log_threadsafe(f"[ERROR] Hydra exited with code {process.returncode} for {site}\n")
 
             except Exception as e:
-                self.hydra_log.insert(tk.END, f"Error running Hydra for {site}: {str(e)}\n")
+                self._append_hydra_log_threadsafe(f"Error running Hydra for {site}: {str(e)}\n")
 
-            self.hydra_log.insert(tk.END, f"=== Finished {site} ===\n\n")
-            self.hydra_log.see(tk.END)
+            self._append_hydra_log_threadsafe(f"=== Finished {site} ===\n\n")
 
         self._write_log_threadsafe("Hydra run complete.")

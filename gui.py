@@ -508,11 +508,9 @@ class CombinedParserGUI(RunnerMixin):
 
                     urls_to_try = [base]
                     if not self.tld_only.get():
-                        urls_to_try.append(base)
-
-                    clean_base = base.rstrip('/')
-                    for path in COMMON_LOGIN_PATHS:
-                        urls_to_try.append(f"{clean_base}{path}")
+                        clean_base = base.rstrip('/')
+                        for path in COMMON_LOGIN_PATHS:
+                            urls_to_try.append(f"{clean_base}{path}")
 
                     form = None
                     fail_reason = None
@@ -562,6 +560,7 @@ class CombinedParserGUI(RunnerMixin):
                                 self.processed_data.setdefault(base, {})
                                 self.processed_data[base]['last_processed'] = datetime.now().isoformat()
                                 self.processed_data[base]['form_found'] = False
+                                self.processed_data[base].setdefault('failed_urls', [])
                                 self.processed_data[base]['failed_urls'].append({'url': base, 'reason': fail_reason or "unknown"})
                                 self.processed_data[base]['combo_count'] = self.processed_data.get(base, {}).get('combo_count', 0)
                         except Exception as e:
@@ -569,7 +568,6 @@ class CombinedParserGUI(RunnerMixin):
 
                         self._update_progress_threadsafe(value=i)
                         self._update_status_threadsafe(f"Extracting: {i}/{total}")
-                        self.root.update_idletasks()
 
                 self._show_progress_threadsafe(False)
 
