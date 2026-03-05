@@ -1,5 +1,6 @@
 import re
 from urllib.parse import urljoin, urlparse
+from playwright.sync_api import sync_playwright
 
 try:
     from bs4 import BeautifulSoup
@@ -9,7 +10,7 @@ except ImportError:
     HAS_BS4 = False
 
 from config import config
-from fetch import HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
+from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
 from helpers import normalize_and_validate_target, validate_url
 
 
@@ -115,7 +116,187 @@ def infer_submit_mode(form, page_url, action_url):
     return "unknown"
 
 
-def extract_login_form(url, proxy=None, strict_validation=True):
+def _is_login_like_form(form):
+    pwd = form.find("input", {"type": "password"})
+    if not pwd:
+        return False
+
+    text_like_inputs = form.find_all("input", {"type": ["text", "email", "tel", ""]})
+    if text_like_inputs:
+        return True
+
+    form_text = form.get_text(" ", strip=True).lower()
+    return any(k in form_text for k in ["login", "log in", "sign in", "password", "username", "email"])
+
+
+def _form_field_metadata(form):
+    fields = []
+    js_indicators = []
+    for inp in form.find_all("input"):
+        input_type = (inp.get("type") or "text").lower()
+        name = inp.get("name")
+        field_id = inp.get("id")
+        placeholder = inp.get("placeholder")
+        autocomplete = inp.get("autocomplete")
+        label_text = None
+        if field_id:
+            label = form.find("label", attrs={"for": field_id})
+            if label:
+                label_text = label.get_text(" ", strip=True)
+
+        entry = {
+            "type": input_type,
+            "name": name,
+            "id": field_id,
+            "placeholder": placeholder,
+            "label": label_text,
+            "autocomplete": autocomplete,
+            "has_name": bool(name),
+        }
+        fields.append(entry)
+
+        if input_type in {"password", "text", "email"} and not name:
+            js_indicators.append("missing_name_on_auth_field")
+
+    action_raw = (form.get("action") or "").strip().lower()
+    if action_raw in {"", "#", "javascript:void(0)", "about:blank"}:
+        js_indicators.append("blank_or_js_action")
+    if form.get("onsubmit"):
+        js_indicators.append("onsubmit_handler")
+
+    form_blob = str(form).lower()
+    if "preventdefault" in form_blob:
+        js_indicators.append("prevent_default_submit")
+    if "addEventListener('submit'" in str(form) or 'addEventListener("submit"' in str(form):
+        js_indicators.append("submit_event_listener")
+
+    return fields, sorted(set(js_indicators))
+
+
+def extract_loginish_metadata(soup, page_url):
+    forms = soup.find_all("form")
+    candidates = []
+
+    for form in forms:
+        if not _is_login_like_form(form):
+            continue
+
+        valid, reason, confidence = validate_login_form(form, str(soup), strict=False)
+        action_url = normalize_form_action(page_url, form.get("action")) or page_url
+        method = (form.get("method") or "get").lower()
+        submit_mode = infer_submit_mode(form, page_url, action_url)
+        fields, js_indicators = _form_field_metadata(form)
+        candidates.append(
+            {
+                "form": form,
+                "confidence": confidence,
+                "reason": reason,
+                "action_url": action_url,
+                "method": method,
+                "submit_mode": submit_mode,
+                "fields": fields,
+                "js_indicators": js_indicators,
+                "strictly_valid": bool(valid),
+            }
+        )
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c["confidence"])
+
+
+def _domain_is_allowlisted(url, allowlisted_domains):
+    if not allowlisted_domains:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    for allowed in allowlisted_domains:
+        cand = (allowed or "").strip().lower()
+        if not cand:
+            continue
+        if host == cand or host.endswith(f".{cand}"):
+            return True
+    return False
+
+
+def observe_login_flow(url, proxy=None, allowlisted_domains=None, enable_dummy_interaction=False):
+    if not HAS_PLAYWRIGHT:
+        return {"status": "observation_unavailable", "reason": "playwright_not_installed"}
+    if enable_dummy_interaction and not _domain_is_allowlisted(url, allowlisted_domains or []):
+        return {
+            "status": "observation_skipped",
+            "reason": "dummy interaction requires explicit allowlisted domain",
+            "allowlisted_domains": allowlisted_domains or [],
+        }
+
+    observed_requests = []
+
+    launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
+    if proxy and proxy.get("server"):
+        launch_args["proxy"] = {"server": proxy["server"]}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**launch_args)
+        context = browser.new_context(
+            ignore_https_errors=bool(config.get("ignore_https_errors", False)),
+            java_script_enabled=True,
+        )
+        page = context.new_page()
+
+        def on_response(resp):
+            req = resp.request
+            endpoint = req.url
+            blob = f"{endpoint} {req.method} {req.post_data or ''}".lower()
+            authish = any(k in blob for k in ["login", "signin", "auth", "session", "token", "password", "username", "email"])
+            if not authish:
+                return
+            headers = req.headers or {}
+            observed_requests.append(
+                {
+                    "endpoint": endpoint,
+                    "method": req.method,
+                    "content_type": headers.get("content-type") or headers.get("Content-Type"),
+                    "status": resp.status,
+                }
+            )
+
+        page.on("response", on_response)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+
+        login_like = bool(page.query_selector("input[type='password']"))
+
+        if enable_dummy_interaction and login_like:
+            user_input = page.query_selector("input[type='email'], input[name*='user' i], input[name*='email' i], input[type='text']")
+            pass_input = page.query_selector("input[type='password']")
+            submit = page.query_selector("button[type='submit'], input[type='submit']")
+            if user_input and pass_input and submit:
+                user_input.fill("test@example.com")
+                pass_input.fill("invalid-password")
+                submit.click(timeout=2000)
+                page.wait_for_timeout(2500)
+
+        cookies = [
+            {
+                "name": c.get("name"),
+                "domain": c.get("domain"),
+                "path": c.get("path"),
+                "httpOnly": c.get("httpOnly"),
+                "secure": c.get("secure"),
+            }
+            for c in context.cookies()
+        ]
+        browser.close()
+
+    return {
+        "status": "observed",
+        "login_like_ui": login_like,
+        "dummy_interaction_enabled": bool(enable_dummy_interaction),
+        "requests": observed_requests,
+        "cookies": cookies,
+    }
+
+
+def extract_login_form(url, proxy=None, strict_validation=True, mode="static", observation_options=None):
     if not HAS_BS4:
         return None, "bs4_not_installed"
 
@@ -151,25 +332,15 @@ def extract_login_form(url, proxy=None, strict_validation=True):
 
     forms = soup.find_all("form")
 
-    best_form = None
-    best_confidence = -1
-    best_reason = ""
+    best_candidate = extract_loginish_metadata(soup, url)
+    if not best_candidate:
+        return None, {"status": "no_form", "reason": "no login-like form detected"}
 
-    for form in forms:
-        is_valid, reason, confidence = validate_login_form(form, html, strict=strict_validation)
-        if not is_valid:
-            continue
-
-        if confidence > best_confidence:
-            best_form = form
-            best_confidence = confidence
-            best_reason = reason
-
-    if not best_form:
-        return None, {"status": "no_form", "reason": f"no valid form (best confidence: {best_confidence})"}
-
-    action = normalize_form_action(url, best_form.get("action")) or url
-    method = (best_form.get("method") or "unknown").lower()
+    best_form = best_candidate["form"]
+    best_confidence = best_candidate["confidence"]
+    best_reason = best_candidate["reason"]
+    action = best_candidate["action_url"]
+    method = best_candidate["method"]
 
     post_parts = []
     username_field = None
@@ -196,7 +367,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         if n:
             post_parts.append(f"{n}={v}")
 
-    submit_mode = infer_submit_mode(best_form, url, action)
+    submit_mode = best_candidate["submit_mode"]
     failure = detect_failure_string(soup, url)
     post_data = "&".join(post_parts)
 
@@ -207,7 +378,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         target = urlparse(url).netloc or url
         hydra_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:{failure}" -V -t 4 -f'
 
-    return {
+    result = {
         "status": status,
         "original_url": url,
         "action": action,
@@ -223,4 +394,23 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         "pass_field": password_field,
         "submit_mode": submit_mode,
         "reasons": best_reason,
-    }, None
+        "classification": "✅ actionable native POST form" if status == "success_form" else "🟨 login-ish (JS-handled / non-POST / missing action)",
+        "login_metadata": {
+            "page_url": url,
+            "fields": best_candidate["fields"],
+            "confidence": best_confidence,
+            "why": best_reason,
+            "js_indicators": best_candidate["js_indicators"],
+        },
+    }
+
+    if mode == "observation":
+        opts = observation_options or {}
+        result["observed_login_flow"] = observe_login_flow(
+            url,
+            proxy=proxy,
+            allowlisted_domains=opts.get("allowlisted_domains", []),
+            enable_dummy_interaction=bool(opts.get("enable_dummy_interaction", False)),
+        )
+
+    return result, None

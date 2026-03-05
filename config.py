@@ -124,6 +124,9 @@ def load_config():
     loaded.setdefault("cache_ttl_days", 30)
     loaded.setdefault("failed_retry_ttl_days", 1)
     loaded.setdefault("debug_logging", False)
+    loaded.setdefault("analysis_mode", "static")
+    loaded.setdefault("observation_enable_dummy_interaction", False)
+    loaded.setdefault("observation_allowlisted_domains", [])
     return loaded
 
 

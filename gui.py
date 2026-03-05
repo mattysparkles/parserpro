@@ -850,7 +850,16 @@ class CombinedParserGUI(RunnerMixin):
                     for url in urls_to_try:
                         if not url:
                             continue
-                        form_data, error_info = extract_login_form(url, proxy, strict_validation=self.strict_validation.get())
+                        form_data, error_info = extract_login_form(
+                            url,
+                            proxy,
+                            strict_validation=self.strict_validation.get(),
+                            mode=str(config.get("analysis_mode", "static") or "static"),
+                            observation_options={
+                                "enable_dummy_interaction": bool(config.get("observation_enable_dummy_interaction", False)),
+                                "allowlisted_domains": config.get("observation_allowlisted_domains", []) or [],
+                            },
+                        )
                         if form_data:
                             return {"status": form_data.get("status", "success_loginish"), "form": form_data, "used_url": url}
 
@@ -908,6 +917,9 @@ class CombinedParserGUI(RunnerMixin):
                                         "confidence": form.get("confidence"),
                                         "reasons": form.get("reasons"),
                                         "submit_mode": form.get("submit_mode", "unknown"),
+                                        "classification": form.get("classification"),
+                                        "login_metadata": form.get("login_metadata", {}),
+                                        "observed_login_flow": form.get("observed_login_flow"),
                                     },
                                 })
                                 reason = form.get('validation_reason') or form.get('reasons') or 'ok'
@@ -919,7 +931,7 @@ class CombinedParserGUI(RunnerMixin):
                             elif status == "no_form":
                                 reason = outcome.get('reason', 'no matching form')
                                 entry.update({"status": "no_form", "form_found": False, "last_error_code": None, "last_error_hint": None, "last_error_detail": None})
-                                self._write_log_threadsafe(f"{base} :: status=no_form confidence=0 reason={reason}")
+                                self._write_log_threadsafe(f"{base} :: status=no_form ❌ no login form confidence=0 reason={reason}")
                             else:
                                 code = outcome.get("error_code") or "fetch_failed"
                                 hint = outcome.get("error_hint") or outcome.get("hint") or "Navigation failed"
