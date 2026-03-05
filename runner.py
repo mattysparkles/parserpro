@@ -16,51 +16,85 @@ class RunnerMixin:
         self.ui_queue.put(("hydra_log", text))
 
     def build_runner_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+
         frame = ttk.Frame(tab, padding=12)
-        frame.pack(fill="both", expand=True)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
 
-        ttk.Label(frame, text="Command Runner - Execute saved command templates", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=5)
+        ttk.Label(frame, text="Command Runner - Execute saved command templates", style="Header.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        filter_frame = ttk.LabelFrame(frame, text="Filters", padding=8)
-        filter_frame.pack(fill="x", pady=4)
+        filter_frame = ttk.LabelFrame(frame, text="Filters")
+        filter_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        for idx in range(9):
+            filter_frame.columnconfigure(idx, weight=1 if idx in {1, 3, 5, 7} else 0)
 
         self.min_combos_var = tk.StringVar(value="0")
         self.min_hits_var = tk.StringVar(value="0")
         self.status_filter_var = tk.StringVar(value="All")
         self.last_run_filter_var = tk.StringVar(value="All")
 
-        ttk.Label(filter_frame, text="Min combos").grid(row=0, column=0, padx=4, pady=2)
-        ttk.Spinbox(filter_frame, from_=0, to=99999999, increment=1, textvariable=self.min_combos_var, width=10).grid(row=0, column=1, padx=4, pady=2)
-        ttk.Label(filter_frame, text="Status").grid(row=0, column=2, padx=4, pady=2)
-        ttk.Combobox(filter_frame, textvariable=self.status_filter_var, values=["All", "Pending", "Running", "Failed", "Success"], state="readonly", width=12).grid(row=0, column=3, padx=4, pady=2)
-        ttk.Label(filter_frame, text="Min hits").grid(row=0, column=4, padx=4, pady=2)
-        ttk.Spinbox(filter_frame, from_=0, to=99999999, increment=1, textvariable=self.min_hits_var, width=10).grid(row=0, column=5, padx=4, pady=2)
-        ttk.Label(filter_frame, text="Last run").grid(row=0, column=6, padx=4, pady=2)
-        ttk.Combobox(filter_frame, textvariable=self.last_run_filter_var, values=["All", "Never Run", "Has Run"], state="readonly", width=12).grid(row=0, column=7, padx=4, pady=2)
-        ttk.Button(filter_frame, text="Apply", command=self.apply_runner_filters_and_sort).grid(row=0, column=8, padx=4, pady=2)
+        ttk.Label(filter_frame, text="Min combos").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ttk.Spinbox(filter_frame, from_=0, to=99999999, increment=1, textvariable=self.min_combos_var, width=10).grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        ttk.Label(filter_frame, text="Status").grid(row=0, column=2, padx=4, pady=4, sticky="w")
+        ttk.Combobox(filter_frame, textvariable=self.status_filter_var, values=["All", "Pending", "Running", "Failed", "Success"], state="readonly", width=12).grid(row=0, column=3, padx=4, pady=4, sticky="ew")
+        ttk.Label(filter_frame, text="Min hits").grid(row=0, column=4, padx=4, pady=4, sticky="w")
+        ttk.Spinbox(filter_frame, from_=0, to=99999999, increment=1, textvariable=self.min_hits_var, width=10).grid(row=0, column=5, padx=4, pady=4, sticky="ew")
+        ttk.Label(filter_frame, text="Last run").grid(row=0, column=6, padx=4, pady=4, sticky="w")
+        ttk.Combobox(filter_frame, textvariable=self.last_run_filter_var, values=["All", "Never Run", "Has Run"], state="readonly", width=12).grid(row=0, column=7, padx=4, pady=4, sticky="ew")
+        ttk.Button(filter_frame, text="Apply", command=self.apply_runner_filters_and_sort).grid(row=0, column=8, padx=4, pady=4)
+
+        paned = ttk.Panedwindow(frame, orient=tk.VERTICAL)
+        paned.grid(row=2, column=0, sticky="nsew")
+
+        table_section = ttk.LabelFrame(paned, text="Runner Results")
+        table_section.columnconfigure(0, weight=1)
+        table_section.rowconfigure(0, weight=1)
 
         columns = ("Select", "Site", "Combos", "Status", "Hits", "Last Run")
-        self.runner_tree = ttk.Treeview(frame, columns=columns, show="headings", height=15)
+        self.runner_tree = ttk.Treeview(table_section, columns=columns, show="headings", height=15)
         for col in columns:
             self.runner_tree.heading(col, text=col, command=lambda c=col: self.on_runner_heading_click(c))
-            width = 70 if col == "Select" else 160
+            width = 80 if col == "Select" else 180
             self.runner_tree.column(col, width=width, anchor="center" if col == "Select" else "w")
-        self.runner_tree.pack(fill="both", expand=True, pady=5)
+        self.runner_tree.grid(row=0, column=0, sticky="nsew")
         self.runner_tree.bind("<Button-1>", self.on_tree_click, add="+")
 
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill="x", pady=8)
-        ttk.Button(btn_frame, text="Refresh List", command=self.refresh_runner_list).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Run Selected", command=self.run_selected_hydra).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Run All (Filtered)", command=self.run_all_hydra).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Select All (Filtered)", command=self.select_all_filtered).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Deselect All (Filtered)", command=self.deselect_all_filtered).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Invert Selection (Filtered)", command=self.invert_selection_filtered).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Pause/Resume", command=self.toggle_pause).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=self.cancel_pipeline).pack(side="left", padx=5)
+        tree_y = ttk.Scrollbar(table_section, orient="vertical", command=self.runner_tree.yview)
+        tree_y.grid(row=0, column=1, sticky="ns")
+        tree_x = ttk.Scrollbar(table_section, orient="horizontal", command=self.runner_tree.xview)
+        tree_x.grid(row=1, column=0, sticky="ew")
+        self.runner_tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
+        self._bind_scroll_wheel(self.runner_tree)
 
-        self.hydra_log = tk.Text(frame, height=12, wrap="word")
-        self.hydra_log.pack(fill="both", expand=True)
+        log_section = ttk.LabelFrame(paned, text="Runner Log")
+        log_section.columnconfigure(0, weight=1)
+        log_section.rowconfigure(1, weight=1)
+
+        btn_frame = ttk.Frame(log_section)
+        btn_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(btn_frame, text="Refresh List", command=self.refresh_runner_list).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Run Selected", command=self.run_selected_hydra).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Run All (Filtered)", command=self.run_all_hydra).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Select All (Filtered)", command=self.select_all_filtered).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Deselect All (Filtered)", command=self.deselect_all_filtered).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Invert Selection (Filtered)", command=self.invert_selection_filtered).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Pause/Resume", command=self.toggle_pause).pack(side="right", padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.cancel_pipeline).pack(side="right", padx=(16, 4))
+
+        self.hydra_log = tk.Text(log_section, height=12, wrap="none", font=("Consolas", 10), padx=8, pady=8)
+        self.hydra_log.grid(row=1, column=0, sticky="nsew")
+        log_y = ttk.Scrollbar(log_section, orient="vertical", command=self.hydra_log.yview)
+        log_y.grid(row=1, column=1, sticky="ns")
+        log_x = ttk.Scrollbar(log_section, orient="horizontal", command=self.hydra_log.xview)
+        log_x.grid(row=2, column=0, sticky="ew")
+        self.hydra_log.configure(yscrollcommand=log_y.set, xscrollcommand=log_x.set)
+        self._bind_scroll_wheel(self.hydra_log)
+
+        paned.add(table_section, weight=3)
+        paned.add(log_section, weight=2)
 
         for var in (self.min_combos_var, self.min_hits_var, self.status_filter_var, self.last_run_filter_var):
             var.trace_add("write", lambda *_: self.apply_runner_filters_and_sort())
@@ -239,6 +273,7 @@ class RunnerMixin:
         self.pause_button.config(state="normal", text="Pause")
         self.cancel_button.config(state="normal")
         self.status_text.set(f"Runner active ({len(sites)} queued)")
+        self.state_text.set("Running")
         for row in self.runner_rows_all:
             if row["site"] in set(sites):
                 row["status"] = "Running"
@@ -346,6 +381,7 @@ class RunnerMixin:
         self.pause_button.config(state="disabled", text="Pause")
         self.cancel_button.config(state="disabled")
         self.status_text.set(final_msg)
+        self.state_text.set("Idle")
         self.apply_runner_filters_and_sort()
         self.refresh_runner_list()
         self._write_log_threadsafe(final_msg)

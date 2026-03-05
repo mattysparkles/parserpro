@@ -21,16 +21,39 @@ from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_onc
 from runner import RunnerMixin
 
 
+def apply_theme(root):
+    style = ttk.Style(root)
+    available = set(style.theme_names())
+    preferred = "vista" if platform.system() == "Windows" and "vista" in available else "clam"
+    if preferred in available:
+        style.theme_use(preferred)
+
+    base_pad = 8
+    style.configure("TFrame", padding=base_pad)
+    style.configure("TLabelframe", padding=base_pad)
+    style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+    style.configure("TLabel", font=("Segoe UI", 10))
+    style.configure("Header.TLabel", font=("Segoe UI Semibold", 15))
+    style.configure("TButton", padding=(12, 6), font=("Segoe UI", 10))
+    style.configure("Treeview", font=("Segoe UI", 10), rowheight=30)
+    style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+    style.map("Treeview", background=[("selected", "#d9ebff")], foreground=[("selected", "#1f2937")])
+    style.configure("TNotebook.Tab", padding=(16, 8), font=("Segoe UI Semibold", 10))
+
+
 class CombinedParserGUI(RunnerMixin):
     def __init__(self, root):
         self.root = root
+        apply_theme(self.root)
         self.root.title("Ultimate Combo → Hydra Pipeline")
         self.root.geometry("1450x980")
+        self.root.minsize(1200, 720)
 
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.forms_output_path = tk.StringVar()
         self.status_text = tk.StringVar(value="Ready.")
+        self.state_text = tk.StringVar(value="Idle")
         self.header1 = tk.StringVar(value="site")
         self.header2 = tk.StringVar(value="user")
         self.header3 = tk.StringVar(value="pass")
@@ -193,9 +216,9 @@ class CombinedParserGUI(RunnerMixin):
                     self.progress.stop()
             elif event == "progress_visible":
                 if payload:
-                    self.progress.pack(fill="x", pady=8)
+                    self.progress.grid()
                 else:
-                    self.progress.pack_forget()
+                    self.progress.grid_remove()
             elif event == "pipeline_done":
                 self.cleanup_after_pipeline(payload)
             elif event == "runner_done":
@@ -206,69 +229,133 @@ class CombinedParserGUI(RunnerMixin):
         self.root.after(100, self._drain_ui_queue)
 
     def _build_ui(self):
-        notebook = ttk.Notebook(self.root)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        container = ttk.Frame(self.root, padding=8)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        container.rowconfigure(1, weight=0)
+
+        notebook = ttk.Notebook(container)
         self.notebook = notebook
-        notebook.pack(fill="both", expand=True)
-    
+        notebook.grid(row=0, column=0, sticky="nsew")
+
         extractor_tab = ttk.Frame(notebook)
         notebook.add(extractor_tab, text="Extractor")
-    
+
         runner_tab = ttk.Frame(notebook)
         notebook.add(runner_tab, text="Hydra Runner")
-    
+
         self.build_extractor_tab(extractor_tab)
         self.build_runner_tab(runner_tab)
-    
-        # Auto-refresh runner list when switching to Hydra Runner tab
+
+        status_bar = ttk.Frame(container, padding=(8, 4))
+        status_bar.grid(row=1, column=0, sticky="ew")
+        status_bar.columnconfigure(0, weight=1)
+        ttk.Label(status_bar, textvariable=self.status_text).grid(row=0, column=0, sticky="w")
+        ttk.Label(status_bar, textvariable=self.state_text).grid(row=0, column=1, sticky="e")
+
         def on_tab_changed(event):
             selected_tab = notebook.select()
-            # Runner tab is the second tab (index 1)
             if selected_tab == notebook.tabs()[1]:
                 try:
                     self.refresh_runner_list()
                 except AttributeError:
-                    # Safety: if runner_tree not ready yet, skip silently
                     pass
-    
-        notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
-        
-    def build_extractor_tab(self, tab):
-        main = ttk.Frame(tab, padding=12)
-        main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text="Combo Parser + Advanced Form Extractor", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 8))
+        notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
+
+    def _bind_scroll_wheel(self, widget, y_target=None, x_target=None):
+        y_target = y_target or widget
+        x_target = x_target or widget
+
+        def _scroll_vertical(units):
+            y_target.yview_scroll(units, "units")
+            return "break"
+
+        def _scroll_horizontal(units):
+            x_target.xview_scroll(units, "units")
+            return "break"
+
+        system = platform.system()
+        if system in {"Windows", "Darwin"}:
+            def on_mousewheel(event):
+                delta = event.delta
+                if system == "Darwin":
+                    units = -1 if delta > 0 else 1
+                else:
+                    units = int(-1 * (delta / 120)) if delta else 0
+                if units:
+                    return _scroll_vertical(units)
+
+            def on_shift_mousewheel(event):
+                delta = event.delta
+                if system == "Darwin":
+                    units = -1 if delta > 0 else 1
+                else:
+                    units = int(-1 * (delta / 120)) if delta else 0
+                if units:
+                    return _scroll_horizontal(units)
+
+            widget.bind("<MouseWheel>", on_mousewheel, add="+")
+            widget.bind("<Shift-MouseWheel>", on_shift_mousewheel, add="+")
+        else:
+            widget.bind("<Button-4>", lambda _e: _scroll_vertical(-1), add="+")
+            widget.bind("<Button-5>", lambda _e: _scroll_vertical(1), add="+")
+            widget.bind("<Shift-Button-4>", lambda _e: _scroll_horizontal(-1), add="+")
+            widget.bind("<Shift-Button-5>", lambda _e: _scroll_horizontal(1), add="+")
+
+    def build_extractor_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+
+        main = ttk.Frame(tab, padding=12)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(4, weight=1)
+
+        ttk.Label(main, text="Combo Parser + Advanced Form Extractor", style="Header.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         io_grid = ttk.Frame(main)
-        io_grid.pack(fill="x", pady=6)
+        io_grid.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        for idx in range(3):
+            io_grid.columnconfigure(idx, weight=1)
 
-        inp_f = ttk.LabelFrame(io_grid, text="Input (file or folder)", padding=10)
-        inp_f.grid(row=0, column=0, sticky="nsew", padx=10)
-        ttk.Entry(inp_f, textvariable=self.input_path).pack(side="left", fill="x", expand=True, padx=(0,8))
-        ttk.Button(inp_f, text="File", command=self.choose_input_file).pack(side="left", padx=4)
-        ttk.Button(inp_f, text="Folder", command=self.choose_input_folder).pack(side="left")
+        inp_f = ttk.LabelFrame(io_grid, text="Input (file or folder)")
+        inp_f.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        inp_f.columnconfigure(0, weight=1)
+        ttk.Entry(inp_f, textvariable=self.input_path).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(inp_f, text="File", command=self.choose_input_file).grid(row=0, column=1, padx=(0, 4))
+        ttk.Button(inp_f, text="Folder", command=self.choose_input_folder).grid(row=0, column=2)
 
-        out_f = ttk.LabelFrame(io_grid, text="Main CSV Output", padding=10)
-        out_f.grid(row=0, column=1, sticky="nsew", padx=10)
-        ttk.Entry(out_f, textvariable=self.output_path).pack(side="left", fill="x", expand=True, padx=(0,8))
-        ttk.Button(out_f, text="Save As", command=self.choose_output_file).pack(side="left")
+        out_f = ttk.LabelFrame(io_grid, text="Main CSV Output")
+        out_f.grid(row=0, column=1, sticky="nsew", padx=4)
+        out_f.columnconfigure(0, weight=1)
+        ttk.Entry(out_f, textvariable=self.output_path).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(out_f, text="Save As", command=self.choose_output_file).grid(row=0, column=1)
 
-        forms_f = ttk.LabelFrame(io_grid, text="Hydra Forms CSV", padding=10)
-        forms_f.grid(row=0, column=2, sticky="nsew", padx=10)
-        ttk.Entry(forms_f, textvariable=self.forms_output_path).pack(side="left", fill="x", expand=True, padx=(0,8))
-        ttk.Button(forms_f, text="Save As", command=self.choose_forms_output_file).pack(side="left")
+        forms_f = ttk.LabelFrame(io_grid, text="Hydra Forms CSV")
+        forms_f.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        forms_f.columnconfigure(0, weight=1)
+        ttk.Entry(forms_f, textvariable=self.forms_output_path).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(forms_f, text="Save As", command=self.choose_forms_output_file).grid(row=0, column=1)
 
         mid_grid = ttk.Frame(main)
-        mid_grid.pack(fill="x", pady=6)
+        mid_grid.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        for idx in range(3):
+            mid_grid.columnconfigure(idx, weight=1)
 
-        head_f = ttk.LabelFrame(mid_grid, text="CSV Headers", padding=10)
-        head_f.grid(row=0, column=0, sticky="nsew", padx=10)
+        head_f = ttk.LabelFrame(mid_grid, text="CSV Headers")
+        head_f.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         for i, txt, var in zip(range(3), ["Column 1 (site)", "Column 2 (user)", "Column 3 (pass)"], [self.header1, self.header2, self.header3]):
-            ttk.Label(head_f, text=txt).grid(row=i, column=0, sticky="w", padx=6, pady=4)
+            ttk.Label(head_f, text=txt).grid(row=i, column=0, sticky="w", padx=(0, 6), pady=4)
             ttk.Entry(head_f, textvariable=var, width=40).grid(row=i, column=1, sticky="ew", pady=4)
         head_f.columnconfigure(1, weight=1)
 
-        opt_f = ttk.LabelFrame(mid_grid, text="Options", padding=10)
-        opt_f.grid(row=0, column=1, sticky="nsew", padx=10)
+        opt_f = ttk.LabelFrame(mid_grid, text="Options")
+        opt_f.grid(row=0, column=1, sticky="nsew", padx=4)
         ttk.Checkbutton(opt_f, text="Skip blank lines", variable=self.skip_blank).pack(anchor="w")
         ttk.Checkbutton(opt_f, text="Trim whitespace", variable=self.trim_whitespace).pack(anchor="w")
         ttk.Checkbutton(opt_f, text="Create user:pass combo.txt per site", variable=self.create_combo).pack(anchor="w", pady=4)
@@ -277,44 +364,53 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(opt_f, text="Force recheck (ignore cache TTL)", variable=self.force_recheck).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Show debug details", variable=self.show_debug_details).pack(anchor="w", pady=4)
 
-        proxy_f = ttk.LabelFrame(mid_grid, text="Proxy / VPN (NordVPN Auto)", padding=10)
-        proxy_f.grid(row=0, column=2, sticky="nsew", padx=10)
+        proxy_f = ttk.LabelFrame(mid_grid, text="Proxy / VPN (NordVPN Auto)")
+        proxy_f.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
         ttk.Label(proxy_f, text="VPN behavior is controlled by Settings → vpn_control").pack(anchor="w")
         ttk.Label(proxy_f, text="Use proxy_url for an already-running SOCKS/HTTP proxy").pack(anchor="w")
 
-        thread_f = ttk.LabelFrame(main, text="Extraction Speed", padding=10)
-        thread_f.pack(fill="x", pady=6)
-        ttk.Label(thread_f, text="Threads (4-8 recommended):").pack(anchor="w")
-        ttk.Scale(thread_f, from_=1, to=12, orient="horizontal", variable=self.threads, 
-                  length=400, command=lambda v: self.threads.set(int(round(float(v))))).pack(fill="x", padx=8)
-        ttk.Label(thread_f, textvariable=self.threads).pack(anchor="e")
+        thread_f = ttk.LabelFrame(main, text="Extraction Speed")
+        thread_f.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        thread_f.columnconfigure(0, weight=1)
+        ttk.Label(thread_f, text="Threads (4-8 recommended):").grid(row=0, column=0, sticky="w")
+        ttk.Scale(thread_f, from_=1, to=12, orient="horizontal", variable=self.threads, command=lambda v: self.threads.set(int(round(float(v))))).grid(row=1, column=0, sticky="ew", padx=8)
+        ttk.Label(thread_f, textvariable=self.threads).grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
 
-        btn_f = ttk.Frame(main)
-        btn_f.pack(fill="x", pady=12)
+        action_row = ttk.Frame(main)
+        action_row.grid(row=4, column=0, sticky="nsew")
+        action_row.columnconfigure(0, weight=1)
+        action_row.rowconfigure(2, weight=1)
+
+        btn_f = ttk.Frame(action_row)
+        btn_f.grid(row=0, column=0, sticky="e", pady=(0, 8))
         self.start_button = ttk.Button(btn_f, text="Start Pipeline", command=self.start_pipeline)
-        self.start_button.pack(side="left", padx=8)
+        self.start_button.pack(side="left", padx=4)
         self.pause_button = ttk.Button(btn_f, text="Pause", command=self.toggle_pause, state="disabled")
-        self.pause_button.pack(side="left", padx=8)
+        self.pause_button.pack(side="left", padx=4)
         self.cancel_button = ttk.Button(btn_f, text="Cancel", command=self.cancel_pipeline, state="disabled")
-        self.cancel_button.pack(side="left", padx=8)
+        self.cancel_button.pack(side="left", padx=(12, 4))
         self.retry_button = ttk.Button(btn_f, text="Retry Failed", command=self.retry_failed)
-        self.retry_button.pack(side="left", padx=8)
-        ttk.Button(btn_f, text="Settings", command=self.open_settings).pack(side="left", padx=8)
-        ttk.Button(btn_f, text="Clear Log", command=self.clear_log).pack(side="left", padx=8)
+        self.retry_button.pack(side="left", padx=4)
+        ttk.Button(btn_f, text="Settings", command=self.open_settings).pack(side="left", padx=4)
+        ttk.Button(btn_f, text="Clear Log", command=self.clear_log).pack(side="left", padx=4)
 
-        ttk.Label(main, textvariable=self.status_text, foreground="#0066cc").pack(anchor="w", pady=6)
+        self.progress = ttk.Progressbar(action_row, orient="horizontal", mode="determinate")
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.progress.grid_remove()
 
-        self.progress = ttk.Progressbar(main, orient="horizontal", length=960, mode="determinate")
-        self.progress.pack(fill="x", pady=6)
-        self.progress.pack_forget()
+        log_f = ttk.LabelFrame(action_row, text="Extraction Log")
+        log_f.grid(row=2, column=0, sticky="nsew")
+        log_f.columnconfigure(0, weight=1)
+        log_f.rowconfigure(0, weight=1)
 
-        log_f = ttk.LabelFrame(main, text="Log", padding=8)
-        log_f.pack(fill="both", expand=True)
-        self.log = tk.Text(log_f, height=22, wrap="word")
-        self.log.pack(side="left", fill="both", expand=True)
-        sc = ttk.Scrollbar(log_f, orient="vertical", command=self.log.yview)
-        sc.pack(side="right", fill="y")
-        self.log.configure(yscrollcommand=sc.set)
+        self.log = tk.Text(log_f, height=18, wrap="none", font=("Consolas", 10), padx=8, pady=8)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        log_y = ttk.Scrollbar(log_f, orient="vertical", command=self.log.yview)
+        log_y.grid(row=0, column=1, sticky="ns")
+        log_x = ttk.Scrollbar(log_f, orient="horizontal", command=self.log.xview)
+        log_x.grid(row=1, column=0, sticky="ew")
+        self.log.configure(yscrollcommand=log_y.set, xscrollcommand=log_x.set)
+        self._bind_scroll_wheel(self.log)
 
     def open_settings(self):
         settings_window = tk.Toplevel(self.root)
@@ -501,6 +597,7 @@ class CombinedParserGUI(RunnerMixin):
         self.cancel_button.config(state="normal")
         self.retry_button.config(state="disabled")
         self.status_text.set("Running...")
+        self.state_text.set("Running")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(False,))
         self.processing_thread.start()
@@ -521,6 +618,7 @@ class CombinedParserGUI(RunnerMixin):
         self.cancel_button.config(state="normal")
         self.retry_button.config(state="disabled")
         self.status_text.set("Retrying failed sites...")
+        self.state_text.set("Running")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(True,))
         self.processing_thread.start()
@@ -535,12 +633,14 @@ class CombinedParserGUI(RunnerMixin):
             self.pipeline_paused = True
             self.pause_button.config(text="Resume")
             self.status_text.set("Paused")
+            self.state_text.set("Paused")
             log_once("pipeline-paused", "Pipeline/Runner paused; waiting before launching new work.")
         else:
             self.pause_event.clear()
             self.pipeline_paused = False
             self.pause_button.config(text="Pause")
             self.status_text.set("Running...")
+            self.state_text.set("Running")
 
     def cancel_pipeline(self):
         if not self.pipeline_running and not self.runner_running:
@@ -551,6 +651,7 @@ class CombinedParserGUI(RunnerMixin):
         self.pause_event.clear()
         self.cancel_event.set()
         self.status_text.set("Cancelling...")
+        self.state_text.set("Canceled")
         self.cancel_button.config(state="disabled")
         log_once("cancel-requested", "Cancellation requested; stopping outstanding work.")
         self.terminate_active_runner_process()
@@ -580,6 +681,7 @@ class CombinedParserGUI(RunnerMixin):
         self.cancel_button.config(state="disabled")
         self.retry_button.config(state="normal")
         self.status_text.set(final_msg)
+        self.state_text.set("Idle")
         messagebox.showinfo("Pipeline Status", final_msg)
 
         if self.gost_process:
