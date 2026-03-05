@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from app_logging import logger
 from helpers import log_once
 
 
@@ -127,9 +128,11 @@ def load_config():
 
 
 config = load_config()
+logger.set_debug(bool(config.get("debug_logging", False)))
 
 
 def save_config():
+    logger.set_debug(bool(config.get("debug_logging", False)))
     CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
@@ -139,13 +142,13 @@ def download_gost():
 
     asset = _get_matching_gost_asset()
     if not asset:
-        print("Could not determine a valid gost release asset for this platform; continuing without proxy.")
+        logger.warn("Could not determine a valid gost release asset for this platform; continuing without proxy.")
         return None
 
     archive_name = asset["name"]
     archive_path = GOST_ARCHIVE_CACHE / archive_name
     if not archive_path.exists():
-        print(f"Downloading gost archive: {archive_name}")
+        logger.info(f"Downloading gost archive: {archive_name}")
         try:
             with requests.get(asset["browser_download_url"], stream=True, timeout=60) as r:
                 r.raise_for_status()
@@ -154,22 +157,22 @@ def download_gost():
                         if chunk:
                             f.write(chunk)
         except Exception as e:
-            print(f"Failed to download gost ({e}); continuing without proxy.")
+            logger.warn(f"Failed to download gost ({e}); continuing without proxy.")
             return None
 
     try:
         _extract_gost_archive(archive_path)
     except Exception as e:
-        print(f"Failed to extract gost archive ({e}); continuing without proxy.")
+        logger.warn(f"Failed to extract gost archive ({e}); continuing without proxy.")
         return None
 
     if GOST_EXE.exists():
         if platform.system().lower() != "windows":
             GOST_EXE.chmod(0o755)
-        print(f"gost ready at {GOST_EXE}")
+        logger.info(f"gost ready at {GOST_EXE}")
         return GOST_EXE
 
-    print("gost archive extracted but binary was not found; continuing without proxy.")
+    logger.warn("gost archive extracted but binary was not found; continuing without proxy.")
     return None
 
 
@@ -183,7 +186,7 @@ def _get_matching_gost_asset():
         resp.raise_for_status()
         release = resp.json()
     except Exception as e:
-        print(f"Failed to query gost releases API ({e}); continuing without proxy.")
+        logger.warn(f"Failed to query gost releases API ({e}); continuing without proxy.")
         return None
 
     assets = release.get("assets") or []

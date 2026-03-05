@@ -209,3 +209,15 @@ Suggested next improvements:
 ## Why targets may be skipped
 
 Some combo lists contain host:port endpoints that are not browser login pages (for example mining dashboard/service ports). ParserPro validates targets before Playwright/Selenium navigation and skips likely non-web entries to reduce noisy browser errors such as `ERR_CONNECTION_CLOSED`.
+
+
+- **Navigation error codes**
+  - `dns_failed`: DNS resolution failed. ParserPro records this and waits for retry TTL instead of immediate retry.
+  - `conn_closed`: Remote side closed connection or target is not a web endpoint. ParserPro retries once with short backoff.
+  - `tls_mismatch`: TLS negotiation failed (often proxy/AV interception issues).
+  - `cert_invalid`: Certificate is untrusted (possible MITM/captive portal).
+  - `proxy_down`: Configured SOCKS proxy is unreachable; ParserPro retries once without proxy for that run.
+  - `fetch_failed`: Generic navigation failure fallback when no known signature is matched.
+
+- **What “login-ish” means**
+  ParserPro now stores forms with password fields even if they are not strict POST login forms. These entries are marked `success_loginish` with metadata (`method`, `action_url`, `user_field`, `pass_field`, `submit_mode`, confidence/reasons) so reruns can skip redundant fetches while still surfacing useful extraction context.

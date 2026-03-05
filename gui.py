@@ -14,6 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from app_logging import logger
 from config import DATA_DIR, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, get_vpn_control, save_config
 from extract import extract_login_form
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
@@ -44,6 +45,7 @@ class CombinedParserGUI(RunnerMixin):
         self.strict_validation = tk.BooleanVar(value=True)
         self.force_recheck = tk.BooleanVar(value=bool(config.get("force_recheck", False)))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
+        self.show_debug_details = tk.BooleanVar(value=False)
 
         self.pipeline_running = False
         self.pipeline_paused = False
@@ -112,7 +114,9 @@ class CombinedParserGUI(RunnerMixin):
                 "status": status,
                 "extracted": extracted,
                 "last_error_code": entry.get("last_error_code"),
-                "last_error_message": entry.get("last_error_message"),
+                "last_error_hint": entry.get("last_error_hint"),
+                "last_error_detail": entry.get("last_error_detail") or entry.get("last_error_message"),
+                "last_error_stacktrace": entry.get("last_error_stacktrace"),
                 "combo_count": entry.get("combo_count", 0),
                 "combo_path": entry.get("combo_path", ""),
                 "hydra_command_template": entry.get("hydra_command_template", ""),
@@ -145,8 +149,8 @@ class CombinedParserGUI(RunnerMixin):
             return "recent fetch failure"
 
         ttl_days = int(config.get("cache_ttl_days", 30))
-        if status in {"success", "no_form"} and self._is_cache_fresh(entry, ttl_days):
-            if status == "success" and not (entry.get("extracted") or {}).get("action_url"):
+        if status in {"success", "success_form", "success_loginish", "no_form"} and self._is_cache_fresh(entry, ttl_days):
+            if status in {"success", "success_form"} and not (entry.get("extracted") or {}).get("action_url"):
                 return None
             return "already cached"
         return None
@@ -271,6 +275,7 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(opt_f, text="Extract login forms", variable=self.extract_forms).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Strict form validation", variable=self.strict_validation).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Force recheck (ignore cache TTL)", variable=self.force_recheck).pack(anchor="w", pady=4)
+        ttk.Checkbutton(opt_f, text="Show debug details", variable=self.show_debug_details).pack(anchor="w", pady=4)
 
         proxy_f = ttk.LabelFrame(mid_grid, text="Proxy / VPN (NordVPN Auto)", padding=10)
         proxy_f.grid(row=0, column=2, sticky="nsew", padx=10)
@@ -355,6 +360,9 @@ class CombinedParserGUI(RunnerMixin):
         self.twocaptcha_key = tk.StringVar(value=config.get("twocaptcha_key", ""))
         ttk.Entry(settings_window, textvariable=self.twocaptcha_key).pack(pady=5)
 
+        self.debug_logging = tk.BooleanVar(value=bool(config.get("debug_logging", False)))
+        ttk.Checkbutton(settings_window, text="Enable debug logging", variable=self.debug_logging).pack(pady=5)
+
         ttk.Label(settings_window, text="Burp Proxy (optional, e.g. http://127.0.0.1:8080)").pack(pady=5)
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         ttk.Entry(settings_window, textvariable=self.burp_proxy).pack(pady=5, fill="x", padx=16)
@@ -375,6 +383,8 @@ class CombinedParserGUI(RunnerMixin):
         config['force_recheck'] = bool(self.force_recheck.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
+        config['debug_logging'] = bool(self.debug_logging.get())
+        logger.set_debug(bool(config.get('debug_logging', False)))
         save_config()
         messagebox.showinfo("Settings", "Settings saved.")
         if self.settings_window and self.settings_window.winfo_exists():
@@ -740,7 +750,7 @@ class CombinedParserGUI(RunnerMixin):
                             continue
                         form_data, error_info = extract_login_form(url, proxy, strict_validation=self.strict_validation.get())
                         if form_data:
-                            return {"status": "success", "form": form_data, "used_url": url}
+                            return {"status": form_data.get("status", "success_loginish"), "form": form_data, "used_url": url}
 
                         if isinstance(error_info, dict) and error_info.get("status") == "skipped_invalid_target":
                             return error_info
@@ -771,46 +781,58 @@ class CombinedParserGUI(RunnerMixin):
                         try:
                             outcome = future.result() or {"status": "fetch_failed", "error_message": "unknown"}
                             status = outcome.get("status")
-                            if status == "success":
+                            if status in {"success_form", "success_loginish"}:
                                 form = outcome["form"]
                                 form['base_url'] = base
                                 form['combo_file'] = get_site_filename(base)
-                                form['full_hydra_command'] = form['hydra_command_template'].replace("{{combo_file}}", get_site_filename(base))
-                                results.append(form)
+                                if form.get('hydra_command_template'):
+                                    form['full_hydra_command'] = form['hydra_command_template'].replace("{{combo_file}}", get_site_filename(base))
+                                    results.append(form)
                                 entry.update({
-                                    "status": "success",
-                                    "form_found": True,
+                                    "status": status,
+                                    "form_found": status == "success_form",
                                     "last_error_code": None,
-                                    "last_error_message": None,
+                                    "last_error_hint": None,
+                                    "last_error_detail": None,
+                                    "last_error_stacktrace": None,
                                     "hydra_command_template": form.get("hydra_command_template", ""),
                                     "extracted": {
                                         "page_url": form.get("original_url"),
-                                        "action_url": form.get("action"),
-                                        "method": "post",
-                                        "user_field": "^USER^",
-                                        "pass_field": "^PASS^",
+                                        "action_url": form.get("action_url") or form.get("action"),
+                                        "method": form.get("method", "unknown"),
+                                        "user_field": form.get("user_field"),
+                                        "pass_field": form.get("pass_field"),
                                         "other_fields": form.get("post_data", ""),
                                         "confidence": form.get("confidence"),
+                                        "reasons": form.get("reasons"),
+                                        "submit_mode": form.get("submit_mode", "unknown"),
                                     },
                                 })
-                                self._write_log_threadsafe(f"{base} :: Login form found (confidence {form.get('confidence', 0)}): {form.get('action')} fields=^USER^/^PASS^")
+                                reason = form.get('validation_reason') or form.get('reasons') or 'ok'
+                                self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
                             elif status == "skipped_invalid_target":
-                                entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "INVALID_TARGET", "last_error_message": outcome.get("reason")})
-                                self._write_log_threadsafe(f"{base} :: Skipped (invalid target: {outcome.get('reason', 'invalid target')})")
+                                reason = outcome.get('reason', 'invalid target')
+                                entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "invalid_target", "last_error_hint": reason, "last_error_detail": reason})
+                                self._write_log_threadsafe(f"{base} :: status=skipped_invalid_target confidence=0 reason={reason}")
                             elif status == "no_form":
-                                entry.update({"status": "no_form", "form_found": False, "last_error_code": None, "last_error_message": None})
-                                self._write_log_threadsafe(f"{base} :: No login form found ({outcome.get('reason', 'no matching form')})")
+                                reason = outcome.get('reason', 'no matching form')
+                                entry.update({"status": "no_form", "form_found": False, "last_error_code": None, "last_error_hint": None, "last_error_detail": None})
+                                self._write_log_threadsafe(f"{base} :: status=no_form confidence=0 reason={reason}")
                             else:
-                                code = outcome.get("error_code") or "UNKNOWN_FETCH_ERROR"
-                                hint = outcome.get("hint") or "network/browser issue"
-                                message = outcome.get("error_message") or "fetch failed"
-                                entry.update({"status": "fetch_failed", "form_found": False, "last_error_code": code, "last_error_message": message})
-                                self._write_log_threadsafe(f"{base} :: Fetch failed: {code} ({hint})")
+                                code = outcome.get("error_code") or "fetch_failed"
+                                hint = outcome.get("error_hint") or outcome.get("hint") or "Navigation failed"
+                                detail = outcome.get("error_detail") or outcome.get("error_message") or "fetch failed"
+                                stacktrace = outcome.get("error_stacktrace")
+                                entry.update({"status": "fetch_failed", "form_found": False, "last_error_code": code, "last_error_hint": hint, "last_error_detail": detail, "last_error_stacktrace": stacktrace})
+                                extra = f" detail={detail}" if self.show_debug_details.get() else ""
+                                if self.show_debug_details.get() and stacktrace:
+                                    extra += f" stack={stacktrace.splitlines()[-1]}"
+                                self._write_log_threadsafe(f"{base} :: status=fetch_failed confidence=0 reason={hint}{extra}")
 
                             entry["combo_count"] = self.processed_data.get(base, {}).get('combo_count', 0)
                         except Exception as e:
                             if bool(config.get("debug_logging", False)):
-                                print(f"Thread error for {base}: {e}")
+                                logger.debug(f"Thread error for {base}: {e}")
 
                         self._update_progress_threadsafe(value=i)
                         self._update_status_threadsafe(f"Extracting: {i}/{total}")
