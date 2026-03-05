@@ -1,0 +1,27 @@
+import unittest
+
+from extract import normalize_form_action
+from helpers import validate_url
+
+
+class UrlValidationTests(unittest.TestCase):
+    def test_validate_url_rejects_obvious_garbage(self):
+        self.assertIsNone(validate_url("{ major:0, minor:1 }"))
+        self.assertIsNone(validate_url("toString:function(){}"))
+
+    def test_validate_url_adds_https_for_hostnames(self):
+        self.assertEqual(validate_url("example.com/login"), "https://example.com/login")
+
+    def test_normalize_form_action_defaults_to_page_url(self):
+        page = "https://example.com/login"
+        self.assertEqual(normalize_form_action(page, ""), page)
+
+    def test_normalize_form_action_resolves_relative(self):
+        self.assertEqual(
+            normalize_form_action("https://example.com/login", "/auth"),
+            "https://example.com/auth",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

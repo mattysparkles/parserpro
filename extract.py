@@ -9,6 +9,7 @@ except ImportError:
     HAS_BS4 = False
 
 from fetch import HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
+from helpers import validate_url
 
 
 def detect_failure_string(soup, url):
@@ -46,9 +47,9 @@ def validate_login_form(form, html_content, strict=True):
         reasons.append("non-POST method")
 
     action = form.get("action", "").strip()
-    if not action or action in ["#", "javascript:void(0)", "about:blank"]:
+    if action in ["#", "javascript:void(0)", "about:blank"]:
         if strict:
-            return False, "invalid or empty action URL", 0
+            return False, "invalid action URL", 0
         confidence += 10
         reasons.append("suspicious action URL")
 
@@ -95,9 +96,23 @@ def validate_login_form(form, html_content, strict=True):
     return True, f"valid (confidence: {confidence})", confidence
 
 
+def normalize_form_action(page_url, action):
+    base_url = validate_url(page_url)
+    if not base_url:
+        return None
+
+    raw_action = (action or "").strip()
+    candidate = base_url if not raw_action else urljoin(base_url, raw_action)
+    return validate_url(candidate)
+
+
 def extract_login_form(url, proxy=None, strict_validation=True):
     if not HAS_BS4:
         return None, "bs4_not_installed"
+
+    url = validate_url(url)
+    if not url:
+        return None, "invalid_url"
 
     html, error = fetch_page_playwright(url, proxy)
     fallback_used = False
@@ -138,10 +153,9 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     if not best_form:
         return None, f"no_valid_form (best confidence: {best_confidence})"
 
-    action = (best_form.get("action") or "").strip()
+    action = normalize_form_action(url, best_form.get("action"))
     if not action:
-        action = url
-    action = urljoin(url, action)
+        return None, "invalid action"
 
     if best_form.get("method", "post").lower() != "post":
         return None, "non_post_form_selected"
