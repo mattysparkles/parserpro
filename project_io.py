@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlparse
 
-PROJECT_SCHEMA_VERSION = 2
+PROJECT_SCHEMA_VERSION = 3
 
 
 def utc_now_iso():
@@ -22,7 +22,7 @@ def atomic_write_json(path, payload):
     Path(temp_name).replace(target)
 
 
-def build_project_payload(*, project_name, project_path, created_ts, sites_db, filters, sort_state, selection, ui_state, app_settings, timeline_events=None):
+def build_project_payload(*, project_name, project_path, created_ts, sites_db, filters, sort_state, selection, ui_state, app_settings, timeline_events=None, run_summaries=None):
     return {
         "schema_version": PROJECT_SCHEMA_VERSION,
         "project_name": project_name or "Untitled",
@@ -37,6 +37,7 @@ def build_project_payload(*, project_name, project_path, created_ts, sites_db, f
         "row_selection": selection or [],
         "results": sites_db or {},
         "timeline_events": timeline_events or [],
+        "run_summaries": run_summaries or [],
         "ui_state": ui_state or {},
         "session_settings": {
             "ignore_https_errors": bool(app_settings.get("ignore_https_errors", False)),
@@ -62,6 +63,7 @@ def load_project_payload(payload):
         "row_selection": data.get("row_selection") or [],
         "results": data.get("results") or {},
         "timeline_events": data.get("timeline_events") or [],
+        "run_summaries": data.get("run_summaries") or [],
         "ui_state": data.get("ui_state") or {},
         "session_settings": data.get("session_settings") or {},
         "project_path": data.get("project_path", ""),
@@ -96,10 +98,12 @@ def site_report_rows(sites_db):
     return rows
 
 
-def export_rows_json(path, *, project_meta, rows, summary, timeline_events=None):
+def export_rows_json(path, *, project_meta, rows, summary, timeline_events=None, run_summaries=None):
     payload = {"project": project_meta, "summary": summary, "entries": rows}
     if timeline_events is not None:
         payload["timeline_events"] = timeline_events
+    if run_summaries is not None:
+        payload["run_summaries"] = run_summaries
     atomic_write_json(path, payload)
 
 
@@ -120,6 +124,50 @@ def export_rows_csv(path, rows):
         writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def export_run_summaries_csv(path, run_summaries):
+    fieldnames = [
+        "run_id",
+        "started_ts",
+        "ended_ts",
+        "duration_s",
+        "mode",
+        "notes",
+        "sites_total_seen",
+        "sites_processed_this_run",
+        "sites_skipped_cached",
+        "successes_actionable",
+        "successes_loginish",
+        "no_form",
+        "fetch_failed",
+        "dns_failed",
+        "tls_failed",
+        "proxy_failed",
+        "conn_closed",
+        "other_failed",
+        "top_error_code",
+        "top_error_count",
+        "top_domain_failed",
+        "top_domain_count",
+        "avg_fetch_ms",
+        "p95_fetch_ms",
+        "avg_extract_ms",
+        "p95_extract_ms",
+    ]
+    with Path(path).open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
+        writer.writeheader()
+        for summary in run_summaries or []:
+            top_error = (summary.get("top_error_codes") or [("", "")])[0]
+            top_domain = (summary.get("top_domains_failed") or [("", "")])[0]
+            writer.writerow({
+                **{k: summary.get(k) for k in fieldnames if k not in {"top_error_code", "top_error_count", "top_domain_failed", "top_domain_count"}},
+                "top_error_code": top_error[0],
+                "top_error_count": top_error[1],
+                "top_domain_failed": top_domain[0],
+                "top_domain_count": top_domain[1],
+            })
 
 
 DIAG_CATEGORIES = {

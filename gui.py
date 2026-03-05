@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from project_io import (
     diagnostics_summary,
     export_rows_csv,
     export_rows_json,
+    export_run_summaries_csv,
     export_timeline_csv,
     load_project_payload,
     site_report_rows,
@@ -34,6 +36,7 @@ from project_io import (
     top_failing_domains,
     utc_now_iso,
 )
+from run_summary import RunSummary, compute_run_summary, from_dict as run_summary_from_dict
 from timeline import in_time_window, make_event, normalize_event, parse_ts
 
 
@@ -102,6 +105,10 @@ class CombinedParserGUI(RunnerMixin):
         self.timeline_coalesce_last_summary = {}
         self.timeline_fetch_failures = deque()
         self.timeline_last_fetch_burst_ts = 0.0
+        self.run_summaries = []
+        self.run_history_sort_state = {"column": "Started", "reverse": True}
+        self.active_run_context = None
+        self.selected_run_id = None
 
         self.processed_file = PROCESSED_SITES_FILE
         self.processed_data = self.load_processed_data()
@@ -160,6 +167,16 @@ class CombinedParserGUI(RunnerMixin):
         self.processed_file.write_text(json.dumps(self.processed_data, indent=2), encoding='utf-8')
 
     def record_event(self, level, category, action, message, metrics=None, allow_coalesce=True):
+        if hasattr(self, "_main_thread") and threading.current_thread() is not self._main_thread:
+            self.ui_queue.put(("timeline_event", {
+                "level": level,
+                "category": category,
+                "action": action,
+                "message": message,
+                "metrics": metrics,
+                "allow_coalesce": allow_coalesce,
+            }))
+            return
         event = make_event(level, category, action, message, metrics=metrics)
         self.timeline_events.append(event)
         if allow_coalesce and event["level"] in {"WARN", "ERROR"}:
@@ -201,6 +218,7 @@ class CombinedParserGUI(RunnerMixin):
         export_menu = tk.Menu(file_menu, tearoff=0)
         export_menu.add_command(label="JSON", command=self.export_report_json)
         export_menu.add_command(label="CSV", command=self.export_report_csv)
+        export_menu.add_command(label="Run Summaries CSV", command=self.export_run_summaries_csv)
         export_menu.add_command(label="Timeline CSV", command=self.export_timeline_csv)
         file_menu.add_cascade(label="Export", menu=export_menu)
         file_menu.add_separator()
@@ -321,6 +339,15 @@ class CombinedParserGUI(RunnerMixin):
                 self.finish_runner_execution(payload)
             elif event == "runner_refresh":
                 self.apply_runner_filters_and_sort()
+            elif event == "timeline_event":
+                self.record_event(
+                    payload.get("level"),
+                    payload.get("category"),
+                    payload.get("action"),
+                    payload.get("message"),
+                    metrics=payload.get("metrics"),
+                    allow_coalesce=bool(payload.get("allow_coalesce", True)),
+                )
 
         self.root.after(100, self._drain_ui_queue)
 
@@ -731,6 +758,7 @@ class CombinedParserGUI(RunnerMixin):
             ui_state=ui_state,
             app_settings=app_settings,
             timeline_events=self.timeline_events,
+            run_summaries=[s.to_dict() for s in self.run_summaries],
         )
 
     def _autosave_now(self):
@@ -796,6 +824,8 @@ class CombinedParserGUI(RunnerMixin):
         self.sites_db = proj.get("results") or {}
         self.processed_data = self.sites_db
         self.timeline_events = [normalize_event(ev) for ev in (proj.get("timeline_events") or [])]
+        self.run_summaries = [run_summary_from_dict(item) for item in (proj.get("run_summaries") or [])]
+        self.selected_run_id = self.run_summaries[-1].run_id if self.run_summaries else None
         self.save_processed_data()
         self.refresh_troubleshooting_panel()
         self.request_autosave()
@@ -813,6 +843,7 @@ class CombinedParserGUI(RunnerMixin):
         self.refresh_runner_list()
         self.refresh_troubleshooting_panel()
         self.refresh_timeline_view()
+        self.refresh_run_history_view()
         self.record_event("INFO", "project", "load", "Project opened", {"path": fp})
         self.status_text.set(f"Opened project: {Path(fp).name}")
 
@@ -830,9 +861,18 @@ class CombinedParserGUI(RunnerMixin):
             return
         rows = self._rows_for_export(filtered=filtered)
         include_timeline = messagebox.askyesno("Timeline", "Include timeline in JSON export?")
+        include_runs = messagebox.askyesno("Run summaries", "Include run summaries in JSON export?")
         timeline = self._filtered_timeline_events() if include_timeline else None
-        export_rows_json(fp, project_meta={"name": self.current_project_name, "path": self.current_project_path}, rows=rows, summary=summarize_status_counts(rows), timeline_events=timeline)
-        self.record_event("INFO", "export", "export", "JSON export created", {"record_count": len(rows), "include_timeline": bool(include_timeline)})
+        summaries = [s.to_dict() for s in self.run_summaries] if include_runs else None
+        export_rows_json(
+            fp,
+            project_meta={"name": self.current_project_name, "path": self.current_project_path},
+            rows=rows,
+            summary=summarize_status_counts(rows),
+            timeline_events=timeline,
+            run_summaries=summaries,
+        )
+        self.record_event("INFO", "export", "export", "JSON export created", {"record_count": len(rows), "include_timeline": bool(include_timeline), "include_run_summaries": bool(include_runs)})
         self.status_text.set(f"Exported JSON report: {Path(fp).name}")
 
     def export_report_csv(self):
@@ -845,9 +885,17 @@ class CombinedParserGUI(RunnerMixin):
         self.record_event("INFO", "export", "export", "CSV export created", {"record_count": len(rows)})
         self.status_text.set(f"Exported CSV report: {Path(fp).name}")
 
+    def export_run_summaries_csv(self):
+        fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not fp:
+            return
+        export_run_summaries_csv(fp, [s.to_dict() for s in self.run_summaries])
+        self.record_event("INFO", "export", "export", "Run summary CSV exported", {"run_count": len(self.run_summaries)})
+        self.status_text.set(f"Exported run summary CSV: {Path(fp).name}")
+
     def build_timeline_tab(self, tab):
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(2, weight=1)
+        tab.rowconfigure(4, weight=1)
 
         controls = ttk.Frame(tab, padding=8)
         controls.grid(row=0, column=0, sticky="ew")
@@ -863,22 +911,146 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Combobox(controls, textvariable=self.timeline_range_var, values=["All", "Last 10m", "Last hour", "Today"], width=10, state="readonly").pack(side="left", padx=4)
         ttk.Label(controls, text="Search").pack(side="left", padx=(8, 0))
         self.timeline_search_var = tk.StringVar(value="")
-        ttk.Entry(controls, textvariable=self.timeline_search_var, width=28).pack(side="left", padx=4)
+        ttk.Entry(controls, textvariable=self.timeline_search_var, width=22).pack(side="left", padx=4)
         ttk.Button(controls, text="Apply", command=self.refresh_timeline_view).pack(side="left", padx=4)
         ttk.Button(controls, text="Clear Timeline", command=self.clear_timeline).pack(side="right", padx=4)
 
+        summary = ttk.LabelFrame(tab, text="Latest Run Summary", padding=8)
+        summary.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        summary.columnconfigure(0, weight=1)
+        self.compare_to_previous_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(summary, text="Compare to previous run", variable=self.compare_to_previous_var, command=self.refresh_run_history_view).grid(row=0, column=0, sticky="w")
+        ttk.Button(summary, text="Copy summary", command=self.copy_run_summary).grid(row=0, column=1, sticky="e")
+        self.run_summary_text_var = tk.StringVar(value="No runs recorded yet.")
+        self.run_summary_delta_var = tk.StringVar(value="")
+        ttk.Label(summary, textvariable=self.run_summary_text_var, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 2))
+        ttk.Label(summary, textvariable=self.run_summary_delta_var, justify="left", foreground="#355c7d").grid(row=2, column=0, columnspan=2, sticky="w")
+
+        history_frame = ttk.LabelFrame(tab, text="Run History", padding=6)
+        history_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 6))
+        history_cols = ("Started", "Duration", "Processed", "Actionable", "Login-ish", "No-form", "Failed", "Top Error", "Top Domain")
+        self.run_history_tree = ttk.Treeview(history_frame, columns=history_cols, show="headings", height=6)
+        for col in history_cols:
+            self.run_history_tree.heading(col, text=col, command=lambda c=col: self.sort_run_history_by(c))
+            self.run_history_tree.column(col, width=120 if col not in {"Top Error", "Top Domain"} else 180, anchor="w")
+        self.run_history_tree.pack(fill="x", expand=False)
+        self.run_history_tree.bind("<<TreeviewSelect>>", lambda _e: self.on_run_history_selected())
+
         self.timeline_canvas = tk.Canvas(tab, height=70, bg="white", highlightthickness=1, highlightbackground="#d0d0d0")
-        self.timeline_canvas.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.timeline_canvas.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
 
         cols = ("Time", "Level", "Category", "Action", "Message")
         self.timeline_tree = ttk.Treeview(tab, columns=cols, show="headings")
         for col in cols:
             self.timeline_tree.heading(col, text=col, command=lambda c=col: self.sort_timeline_by(c))
             self.timeline_tree.column(col, anchor="w", width=170 if col != "Message" else 520)
-        self.timeline_tree.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.timeline_tree.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.timeline_tree.bind("<ButtonRelease-1>", lambda _e: self.on_timeline_row_selected())
         self.refresh_timeline_view()
+        self.refresh_run_history_view()
 
+    def _find_run_summary(self, run_id):
+        for idx, summary in enumerate(self.run_summaries):
+            if summary.run_id == run_id:
+                return idx, summary
+        return None, None
+
+    def _summary_block(self, summary, include_delta=True):
+        top_error = (summary.top_error_codes or [("-", 0)])[0]
+        top_domain = (summary.top_domains_failed or [("-", 0)])[0]
+        lines = [
+            f"Started: {summary.started_ts}",
+            f"Duration: {summary.duration_s:.1f}s | Processed: {summary.sites_processed_this_run} | Skipped cached: {summary.sites_skipped_cached}",
+            f"Actionable: {summary.successes_actionable} | Login-ish: {summary.successes_loginish} | No-form: {summary.no_form} | Failed: {summary.fetch_failed}",
+            f"Failures: DNS {summary.dns_failed} / TLS {summary.tls_failed} / Proxy {summary.proxy_failed} / ConnClosed {summary.conn_closed} / Other {summary.other_failed}",
+            f"Top error: {top_error[0]} ({top_error[1]}) | Top domain: {top_domain[0]} ({top_domain[1]})",
+        ]
+        if include_delta and self.compare_to_previous_var.get():
+            delta = self._summary_delta_text(summary)
+            if delta:
+                lines.append(f"Deltas vs previous: {delta}")
+        return "\n".join(lines)
+
+    def _summary_delta_text(self, summary):
+        idx, _ = self._find_run_summary(summary.run_id)
+        if idx is None or idx <= 0:
+            return ""
+        prev = self.run_summaries[idx - 1]
+        fields = ["successes_actionable", "successes_loginish", "no_form", "fetch_failed", "dns_failed", "tls_failed", "proxy_failed", "conn_closed", "other_failed"]
+        out = []
+        for field in fields:
+            diff = getattr(summary, field, 0) - getattr(prev, field, 0)
+            if diff:
+                out.append(f"{field} {diff:+d}")
+        return ", ".join(out)
+
+    def refresh_run_history_view(self):
+        if not hasattr(self, "run_history_tree"):
+            return
+        tree = self.run_history_tree
+        tree.delete(*tree.get_children())
+        column = self.run_history_sort_state.get("column", "Started")
+        reverse = bool(self.run_history_sort_state.get("reverse", True))
+        rows = list(self.run_summaries)
+        key_fn = {
+            "Started": lambda r: parse_ts(r.started_ts) or datetime.min,
+            "Duration": lambda r: r.duration_s,
+            "Processed": lambda r: r.sites_processed_this_run,
+            "Actionable": lambda r: r.successes_actionable,
+            "Login-ish": lambda r: r.successes_loginish,
+            "No-form": lambda r: r.no_form,
+            "Failed": lambda r: r.fetch_failed,
+            "Top Error": lambda r: ((r.top_error_codes or [("", 0)])[0][0]).lower(),
+            "Top Domain": lambda r: ((r.top_domains_failed or [("", 0)])[0][0]).lower(),
+        }.get(column, lambda r: parse_ts(r.started_ts) or datetime.min)
+        rows.sort(key=key_fn, reverse=reverse)
+
+        for summary in rows:
+            top_error = (summary.top_error_codes or [("-", 0)])[0]
+            top_domain = (summary.top_domains_failed or [("-", 0)])[0]
+            tree.insert("", "end", iid=summary.run_id, values=(summary.started_ts, f"{summary.duration_s:.1f}s", summary.sites_processed_this_run, summary.successes_actionable, summary.successes_loginish, summary.no_form, summary.fetch_failed, f"{top_error[0]} ({top_error[1]})", f"{top_domain[0]} ({top_domain[1]})"))
+
+        if not self.selected_run_id and self.run_summaries:
+            self.selected_run_id = self.run_summaries[-1].run_id
+        if self.selected_run_id and tree.exists(self.selected_run_id):
+            tree.selection_set(self.selected_run_id)
+            tree.see(self.selected_run_id)
+            _, selected = self._find_run_summary(self.selected_run_id)
+        else:
+            selected = self.run_summaries[-1] if self.run_summaries else None
+        if selected:
+            self.run_summary_text_var.set(self._summary_block(selected, include_delta=False))
+            self.run_summary_delta_var.set(self._summary_delta_text(selected) if self.compare_to_previous_var.get() else "")
+        else:
+            self.run_summary_text_var.set("No runs recorded yet.")
+            self.run_summary_delta_var.set("")
+
+    def sort_run_history_by(self, col):
+        reverse = self.run_history_sort_state.get("column") == col and not self.run_history_sort_state.get("reverse", False)
+        self.run_history_sort_state = {"column": col, "reverse": reverse}
+        self.refresh_run_history_view()
+
+    def on_run_history_selected(self):
+        if not hasattr(self, "run_history_tree"):
+            return
+        sel = self.run_history_tree.selection()
+        if not sel:
+            return
+        self.selected_run_id = sel[0]
+        _, summary = self._find_run_summary(self.selected_run_id)
+        if summary:
+            self.run_summary_text_var.set(self._summary_block(summary, include_delta=False))
+            self.run_summary_delta_var.set(self._summary_delta_text(summary) if self.compare_to_previous_var.get() else "")
+
+    def copy_run_summary(self):
+        if not self.run_summaries:
+            return
+        _, summary = self._find_run_summary(self.selected_run_id)
+        if summary is None:
+            summary = self.run_summaries[-1]
+        text = self._summary_block(summary, include_delta=True)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
     def clear_timeline(self):
         if not messagebox.askyesno("Clear Timeline", "Clear timeline events only?"):
             return
@@ -1045,6 +1217,21 @@ class CombinedParserGUI(RunnerMixin):
         export_rows_csv(fp, rows)
         self.status_text.set(f"Exported diagnostics CSV: {Path(fp).name}")
 
+    def _start_run_context(self, mode, notes=""):
+        started_ts = utc_now_iso()
+        self.active_run_context = {
+            "run_id": str(uuid.uuid4()),
+            "started_ts": started_ts,
+            "mode": mode,
+            "notes": notes,
+            "sites_total_seen": 0,
+            "sites_skipped_cached": 0,
+            "processed_sites": [],
+            "fetch_ms_values": [],
+            "extract_ms_values": [],
+        }
+        self.record_event("INFO", "run", "run_start", "Run started", {"run_id": self.active_run_context["run_id"], "mode": mode})
+
     def start_pipeline(self):
         if self.processing_thread and self.processing_thread.is_alive():
             messagebox.showinfo("Busy", "Pipeline is already running.")
@@ -1062,7 +1249,7 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="disabled")
         self.status_text.set("Running...")
         self.state_text.set("Running")
-        self.record_event("INFO", "run", "start", "Extraction run started")
+        self._start_run_context("extraction")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(False,))
         self.processing_thread.start()
@@ -1084,7 +1271,7 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="disabled")
         self.status_text.set("Retrying failed sites...")
         self.state_text.set("Running")
-        self.record_event("INFO", "run", "retry_failed", "Retry failed run started")
+        self._start_run_context("extraction", notes="retry_failed_only")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(True,))
         self.processing_thread.start()
@@ -1145,6 +1332,28 @@ class CombinedParserGUI(RunnerMixin):
         self.cancel_event.clear()
         self.pause_event.clear()
 
+        ctx = self.active_run_context or {}
+        summary = ctx.get("summary")
+        if summary:
+            self.run_summaries.append(summary)
+            self.selected_run_id = summary.run_id
+            self.refresh_run_history_view()
+            top_error = (summary.top_error_codes or [("-", 0)])[0]
+            self.record_event(
+                "INFO",
+                "run",
+                "run_end",
+                "Run ended",
+                {
+                    "run_id": summary.run_id,
+                    "duration_s": summary.duration_s,
+                    "processed": summary.sites_processed_this_run,
+                    "fetch_failed": summary.fetch_failed,
+                    "top_error": top_error[0],
+                },
+            )
+        self.active_run_context = None
+
         self.start_button.config(state="normal")
         self.pause_button.config(state="disabled")
         self.cancel_button.config(state="disabled")
@@ -1175,6 +1384,33 @@ class CombinedParserGUI(RunnerMixin):
             time.sleep(0.2)
         return self.cancel_event.is_set()
 
+    def _finalize_active_run(self):
+        if not self.active_run_context:
+            return
+        ctx = self.active_run_context
+        ended_ts = utc_now_iso()
+        env = {
+            "proxy_enabled": bool(get_effective_proxy(config, None)),
+            "ignore_https_errors": bool(config.get("ignore_https_errors", False)),
+            "allow_nonstandard_ports": bool(config.get("allow_nonstandard_ports", False)),
+            "app_version": str(config.get("app_version", "unknown")),
+        }
+        summary = compute_run_summary(
+            run_id=ctx.get("run_id"),
+            started_ts=ctx.get("started_ts") or ended_ts,
+            ended_ts=ended_ts,
+            mode=ctx.get("mode", "extraction"),
+            notes=ctx.get("notes", ""),
+            processed_sites=ctx.get("processed_sites") or [],
+            sites_total_seen=ctx.get("sites_total_seen") or 0,
+            sites_skipped_cached=ctx.get("sites_skipped_cached") or 0,
+            sites_db=self.processed_data,
+            fetch_ms_values=ctx.get("fetch_ms_values") or [],
+            extract_ms_values=ctx.get("extract_ms_values") or [],
+            environment_snapshot=env,
+        )
+        self.active_run_context["summary"] = summary
+
     def process_pipeline(self, retry_failed_only=False):
         try:
             input_str = self.input_path.get().strip()
@@ -1183,11 +1419,13 @@ class CombinedParserGUI(RunnerMixin):
 
             if not input_str or not out_csv:
                 self.root.after(0, lambda: messagebox.showerror("Error", "Input and main output required."))
+                self._finalize_active_run()
                 self.cleanup_after_pipeline("Failed - Missing input/output")
                 return
 
             if self.extract_forms.get() and not forms_csv:
                 self.root.after(0, lambda: messagebox.showerror("Error", "Forms output required."))
+                self._finalize_active_run()
                 self.cleanup_after_pipeline("Failed - Missing forms output")
                 return
 
@@ -1198,18 +1436,23 @@ class CombinedParserGUI(RunnerMixin):
             headers = [self.header1.get().strip(), self.header2.get().strip(), self.header3.get().strip()]
             if any(not h for h in headers):
                 self.root.after(0, lambda: messagebox.showerror("Error", "All headers required."))
+                self._finalize_active_run()
                 self.cleanup_after_pipeline("Failed - Missing headers")
                 return
 
             input_files = [in_path] if in_path.is_file() else list(in_path.glob("*.txt"))
             if not input_files:
                 self.root.after(0, lambda: messagebox.showerror("Error", "No .txt files found."))
+                self._finalize_active_run()
                 self.cleanup_after_pipeline("Failed - No input files")
                 return
 
             rows = []
             skipped = 0
             site_combos = {}
+            run_processed_sites = []
+            run_fetch_ms_values = []
+            run_extract_ms_values = []
 
             self._write_log_threadsafe("Collecting data...")
             self._update_status_threadsafe("Collecting...")
@@ -1221,10 +1464,16 @@ class CombinedParserGUI(RunnerMixin):
                 with file.open("r", encoding="utf-8", errors="replace") as f:
                     for ln, raw in enumerate(f, 1):
                         if self.cancel_event.is_set():
+                            self._finalize_active_run()
                             self.cleanup_after_pipeline("Cancelled during data collection")
                             return
 
                         if self.wait_if_paused_or_cancelled():
+                            if self.active_run_context is not None:
+                                self.active_run_context["processed_sites"] = run_processed_sites
+                                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                                self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                            self._finalize_active_run()
                             self.cleanup_after_pipeline("Cancelled while paused")
                             return
 
@@ -1298,9 +1547,17 @@ class CombinedParserGUI(RunnerMixin):
                     site_list.append(base)
                 if cache_skipped:
                     self.record_event("INFO", "cache", "load", "Used cached entries", {"skipped": cache_skipped})
+                if self.active_run_context is not None:
+                    self.active_run_context["sites_total_seen"] = len(site_combos)
+                    self.active_run_context["sites_skipped_cached"] = cache_skipped
 
                 if not site_list:
                     self._write_log_threadsafe("No sites need form extraction.")
+                    if self.active_run_context is not None:
+                        self.active_run_context["processed_sites"] = []
+                        self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                        self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                    self._finalize_active_run()
                     self.cleanup_after_pipeline("Complete - No new forms needed.")
                     return
 
@@ -1335,6 +1592,7 @@ class CombinedParserGUI(RunnerMixin):
                     for url in urls_to_try:
                         if not url:
                             continue
+                        start_fetch = time.perf_counter()
                         form_data, error_info = extract_login_form(
                             url,
                             proxy,
@@ -1345,6 +1603,7 @@ class CombinedParserGUI(RunnerMixin):
                                 "allowlisted_domains": config.get("observation_allowlisted_domains", []) or [],
                             },
                         )
+                        run_fetch_ms_values.append((time.perf_counter() - start_fetch) * 1000)
                         if form_data:
                             return {"status": form_data.get("status", "success_loginish"), "form": form_data, "used_url": url}
 
@@ -1362,10 +1621,20 @@ class CombinedParserGUI(RunnerMixin):
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
                     for i, future in enumerate(as_completed(future_to_base), 1):
                         if self.cancel_event.is_set():
+                            if self.active_run_context is not None:
+                                self.active_run_context["processed_sites"] = run_processed_sites
+                                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                                self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                            self._finalize_active_run()
                             self.cleanup_after_pipeline("Cancelled during extraction")
                             return
 
                         if self.wait_if_paused_or_cancelled():
+                            if self.active_run_context is not None:
+                                self.active_run_context["processed_sites"] = run_processed_sites
+                                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                                self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                            self._finalize_active_run()
                             self.cleanup_after_pipeline("Cancelled while paused")
                             return
 
@@ -1375,8 +1644,11 @@ class CombinedParserGUI(RunnerMixin):
                         entry.setdefault("first_seen_ts", now)
                         entry["last_checked_ts"] = now
                         try:
+                            process_started = time.perf_counter()
                             outcome = future.result() or {"status": "fetch_failed", "error_message": "unknown"}
                             status = outcome.get("status")
+                            run_processed_sites.append(base)
+                            run_extract_ms_values.append((time.perf_counter() - process_started) * 1000)
                             if status in {"success_form", "success_loginish"}:
                                 form = outcome["form"]
                                 form['base_url'] = base
@@ -1466,7 +1738,18 @@ class CombinedParserGUI(RunnerMixin):
                 self.refresh_troubleshooting_panel()
                 self.request_autosave()
 
+            if self.active_run_context is not None:
+                self.active_run_context["sites_total_seen"] = self.active_run_context.get("sites_total_seen") or len(site_combos)
+                self.active_run_context["processed_sites"] = run_processed_sites
+                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                self.active_run_context["extract_ms_values"] = run_extract_ms_values
+            self._finalize_active_run()
             self.cleanup_after_pipeline("Pipeline complete! Check per-site files and hydra_forms.csv")
 
         except Exception as e:
+            if self.active_run_context is not None:
+                self.active_run_context["processed_sites"] = run_processed_sites if "run_processed_sites" in locals() else []
+                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values if "run_fetch_ms_values" in locals() else []
+                self.active_run_context["extract_ms_values"] = run_extract_ms_values if "run_extract_ms_values" in locals() else []
+            self._finalize_active_run()
             self.cleanup_after_pipeline(f"Pipeline failed: {str(e)}")
