@@ -6,6 +6,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from config import config
 from helpers import get_site_filename
 
 
@@ -81,6 +82,9 @@ class RunnerMixin:
 
             combo_file = get_site_filename(site)
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
+            burp_proxy = config.get("burp_proxy", "").strip()
+            if burp_proxy and " -p " not in f" {cmd} ":
+                cmd = f"{cmd} -p {burp_proxy}"
 
             self._append_hydra_log_threadsafe(f"\n=== Starting Hydra for {site} ===\n")
             self._append_hydra_log_threadsafe(f"Command: {cmd}\n")

@@ -39,6 +39,7 @@ class CombinedParserGUI(RunnerMixin):
         self.tld_only = tk.BooleanVar(value=True)
         self.threads = tk.IntVar(value=6)
         self.strict_validation = tk.BooleanVar(value=True)
+        self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
 
         self.pipeline_running = False
         self.pipeline_paused = False
@@ -216,6 +217,10 @@ class CombinedParserGUI(RunnerMixin):
         self.twocaptcha_key = tk.StringVar(value=config.get("twocaptcha_key", ""))
         ttk.Entry(settings_window, textvariable=self.twocaptcha_key).pack(pady=5)
 
+        ttk.Label(settings_window, text="Burp Proxy (optional, e.g. http://127.0.0.1:8080)").pack(pady=5)
+        self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
+        ttk.Entry(settings_window, textvariable=self.burp_proxy).pack(pady=5, fill="x", padx=16)
+
         ttk.Button(settings_window, text="Save & Close", command=self.save_settings).pack(pady=20)
 
     def save_settings(self):
@@ -223,6 +228,7 @@ class CombinedParserGUI(RunnerMixin):
         config['dbc_pass'] = self.dbc_pass.get()
         config['nord_token'] = self.nord_token.get()
         config['twocaptcha_key'] = self.twocaptcha_key.get()
+        config['burp_proxy'] = self.burp_proxy.get().strip()
         save_config()
         messagebox.showinfo("Settings", "Settings saved.")
         if self.settings_window and self.settings_window.winfo_exists():
@@ -471,6 +477,10 @@ class CombinedParserGUI(RunnerMixin):
             self.save_processed_data()
 
             proxy = self.setup_nordvpn_proxy() if self.use_proxy.get() else None
+            burp_server = config.get("burp_proxy", "").strip()
+            if burp_server:
+                proxy = {"server": burp_server}
+                self._write_log_threadsafe(f"Using Burp proxy for extraction: {burp_server}")
 
             if self.extract_forms.get() and site_combos:
                 site_list = []

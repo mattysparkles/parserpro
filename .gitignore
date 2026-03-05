@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+config.json
+processed_sites.json
+hits_*.txt
+*.csv
+*.zip
+gost.exe

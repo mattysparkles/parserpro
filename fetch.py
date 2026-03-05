@@ -77,7 +77,7 @@ def fetch_page_playwright(url, proxy=None):
     return None, reason
 
 
-def fetch_page_selenium(url):
+def fetch_page_selenium(url, proxy=None):
     if not HAS_SELENIUM:
         return None, "selenium_not_installed"
 
@@ -88,6 +88,8 @@ def fetch_page_selenium(url):
         options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        if proxy and proxy.get("server"):
+            options.add_argument(f"--proxy-server={proxy['server']}")
         driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
         driver.get(url)
         time.sleep(5)
