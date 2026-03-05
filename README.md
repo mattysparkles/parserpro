@@ -136,6 +136,26 @@ python -m unittest tests.test_url_validation
 6. **Persist state** in `processed_sites.json` for retries/runner list.
 7. **Run Hydra** from Runner tab on selected/all sites.
 
+## Login flow analyzer modes
+
+ParserPro now supports two safety-focused analysis modes:
+
+- **Static mode** (default): parse HTML and classify outcomes as:
+  - `✅ actionable native POST form`
+  - `🟨 login-ish (JS-handled / non-POST / missing action)`
+  - `❌ no login form`
+- **Observation mode** (optional): loads target page with Playwright and records observed auth-like requests/cookies as telemetry (`observed_login_flow`).
+
+Observation mode keeps boundaries explicit:
+- Dummy interaction is **off by default**.
+- Dummy interaction only runs when explicitly enabled **and** the domain matches `observation_allowlisted_domains`.
+- Captured data is stored as observed flow metadata (endpoint/method/content-type/status + cookies), not attack instructions.
+
+Configuration keys in `data/config.json`:
+- `analysis_mode`: `"static"` or `"observation"`
+- `observation_enable_dummy_interaction`: `true/false`
+- `observation_allowlisted_domains`: `["example.com"]`
+
 ## Settings
 
 GUI Settings includes:
