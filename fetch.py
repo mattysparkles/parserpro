@@ -64,7 +64,11 @@ def fetch_page_playwright(url, proxy=None):
     if not clean_url:
         return None, "invalid_url"
 
-    effective_proxy = get_effective_proxy(config, proxy)
+    try:
+        effective_proxy = get_effective_proxy(config, proxy)
+    except RuntimeError as e:
+        print(f"Proxy requirement error: {e}")
+        return None, "proxy_required_unreachable"
 
     for attempt in range(2):
         try:
@@ -116,7 +120,11 @@ def fetch_page_selenium(url, proxy=None):
     if not clean_url:
         return None, "invalid_url"
 
-    effective_proxy = get_effective_proxy(config, proxy)
+    try:
+        effective_proxy = get_effective_proxy(config, proxy)
+    except RuntimeError as e:
+        print(f"Proxy requirement error: {e}")
+        return None, "proxy_required_unreachable"
 
     try:
         options = Options()

@@ -15,7 +15,8 @@ ParserPro is a modular Python toolkit that ingests combo lists, normalizes/organ
   - **Extractor**: import combos, normalize sites, extract forms.
   - **Hydra Runner**: run selected or all prepared targets.
 - Supports optional:
-  - NordVPN + gost SOCKS proxy flow.
+  - `vpn_control` (`none` by default, optional `nordvpn`) for VPN automation mode selection.
+  - `proxy_url` routing for an already-running SOCKS/HTTP proxy.
   - Burp proxy routing for extraction and runner command composition.
   - CAPTCHA solving integration (DeathByCaptcha / 2Captcha).
 
@@ -57,11 +58,15 @@ pip install deathbycaptcha
 
 If your environment exposes `HttpClient` but not `SocketClient`, ParserPro now falls back automatically.
 
-### Optional: Proxy (gost + NordVPN)
+### Optional: Proxy / VPN behavior
 
-When NordVPN proxy mode is enabled, ParserPro auto-detects the latest compatible gost release asset for your OS/CPU via GitHub Releases API and caches the archive under `data/downloads/`.
+ParserPro now defaults to `vpn_control: "none"` so it does **not** attempt NordVPN automation unless you explicitly opt in.
 
-If GitHub is unavailable or no matching asset is found, the app logs a clear message and continues in no-proxy mode (it does not crash the pipeline).
+On Windows specifically, ParserPro will not launch the NordVPN GUI executable. If a true headless CLI with connect/disconnect support is not available, it logs: `NordVPN automation not supported on Windows; set vpn_control='none' and manage VPN externally.` and continues with no VPN/no proxy automation.
+
+If `proxy_url` is set, ParserPro only uses it when reachable. If unreachable and `proxy_required` is `false`, it logs once and disables proxy for the run. If `proxy_required` is `true`, it fails fast.
+
+When NordVPN mode is enabled and supported, ParserPro auto-detects the latest compatible gost release asset for your OS/CPU via GitHub Releases API and caches the archive under `data/downloads/`.
 
 ### System tools
 
@@ -100,6 +105,9 @@ GUI Settings includes:
 - DeathByCaptcha username/password
 - 2Captcha API key
 - NordVPN token
+- VPN control (`none` or `nordvpn`)
+- Proxy URL (`proxy_url`, optional socks5/http endpoint)
+- Proxy required (`proxy_required`, fail fast if proxy is unreachable)
 - Burp Proxy (example: `http://127.0.0.1:8080`)
 - `ignore_https_errors` in `data/config.json` (default `false`)
 
@@ -111,6 +119,15 @@ When Burp proxy is configured, extraction fetchers are routed through it and run
 - Set `Burp Proxy` in Settings.
 - If inspecting HTTPS traffic, install Burp CA certificate in the system/browser context used by your tooling.
 - Some environments may also need certificate overrides for Python requests / browser contexts.
+
+
+### Windows recommendation
+
+NordVPN GUI on Windows may steal foreground focus. To avoid disruptions, ParserPro does not control NordVPN by default.
+
+Recommended setup:
+- Connect NordVPN manually at the OS level, then run ParserPro with `vpn_control: "none"`.
+- Or run your own SOCKS/HTTP proxy separately and set `proxy_url` to that listener.
 
 ## Common outputs
 
