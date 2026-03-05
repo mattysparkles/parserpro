@@ -103,7 +103,7 @@ def extract_login_form(url, proxy=None, strict_validation=True):
     fallback_used = False
 
     if not html and HAS_SELENIUM:
-        html, error = fetch_page_selenium(url)
+        html, error = fetch_page_selenium(url, proxy)
         fallback_used = True
 
     if not html:
