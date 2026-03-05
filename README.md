@@ -10,6 +10,7 @@ ParserPro is a modular Python toolkit that ingests combo lists, normalizes/organ
 - Produces a consolidated CSV output for data hygiene and auditing.
 - Creates per-site combo files (`example_com.txt`) for replay/testing.
 - Extracts login form details from target pages (Playwright first, Selenium fallback).
+- Skips invalid/non-web targets before browser navigation (including nonstandard ports unless explicitly allowed).
 - Builds Hydra `http-post-form` command templates from discovered forms.
 - Includes a GUI with two tabs:
   - **Extractor**: import combos, normalize sites, extract forms.
@@ -130,6 +131,10 @@ GUI Settings includes:
 - VPN control (`none` or `nordvpn`)
 - Proxy URL (`proxy_url`, optional socks5/http endpoint)
 - Proxy required (`proxy_required`, fail fast if proxy is unreachable)
+- Allow nonstandard ports (`allow_nonstandard_ports`, default `false`)
+- Cache TTL days (`cache_ttl_days`, default `30`)
+- Failed-fetch retry TTL days (`failed_retry_ttl_days`, default `1`)
+- Force recheck toggle (`force_recheck`, default `false`)
 - Burp Proxy (example: `http://127.0.0.1:8080`)
 - `ignore_https_errors` in `data/config.json` (default `false`)
 
@@ -193,3 +198,14 @@ Suggested next improvements:
   Your SOCKS proxy endpoint is not reachable (commonly `127.0.0.1:1080` when gost is not running). Disable proxy settings (`burp_proxy`, `socks_proxy`, `proxy`) or start the proxy process.
 - **Verify proxy health quickly**
   Confirm the listener is up before extraction, e.g. `python -c "import socket;print(socket.create_connection(('127.0.0.1',1080),1))"` (should connect without exception).
+## Extraction cache behavior
+
+- Cache is stored in `data/processed_sites.json` and reused on later runs.
+- By default, sites with recent `success` or `no_form` status are skipped until TTL expires.
+- Sites with `fetch_failed` are retried after a shorter TTL, or immediately with **Retry Failed**.
+- The Extractor log reports per-site outcome: login form found, no form found, cached skip, invalid-target skip, or fetch failure code.
+- Root-level legacy `processed_sites.json` is migrated once into `data/processed_sites.json`.
+
+## Why targets may be skipped
+
+Some combo lists contain host:port endpoints that are not browser login pages (for example mining dashboard/service ports). ParserPro validates targets before Playwright/Selenium navigation and skips likely non-web entries to reduce noisy browser errors such as `ERR_CONNECTION_CLOSED`.

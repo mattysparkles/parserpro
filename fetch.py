@@ -9,7 +9,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 from config import config, get_effective_proxy
-from helpers import USER_AGENTS, log_once, validate_url
+from helpers import USER_AGENTS, log_once, normalize_and_validate_target
 
 try:
     from selenium import webdriver
@@ -60,9 +60,9 @@ def fetch_page_playwright(url, proxy=None):
     if not HAS_PLAYWRIGHT:
         return None, "playwright_not_installed"
 
-    clean_url = validate_url(url)
+    clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not clean_url:
-        return None, "invalid_url"
+        return None, build_error_payload("INVALID_TARGET", reason or "invalid target", reason or "invalid target")
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
@@ -94,31 +94,23 @@ def fetch_page_playwright(url, proxy=None):
                 browser.close()
                 return html, None
         except Exception as e:
-            err_str = str(e).lower()
-            reason = "unknown"
-            if "name not resolved" in err_str:
-                reason = "dns"
-            elif "connection refused" in err_str:
-                reason = "refused"
-            elif "timed out" in err_str:
-                reason = "timeout"
-            elif "ssl" in err_str or "tls" in err_str:
-                reason = "tls_error"
+            code, message, hint = classify_browser_error(e)
             if attempt == 1:
-                if reason == "tls_error" and effective_proxy:
+                if code in {"ERR_SSL_VERSION_OR_CIPHER_MISMATCH", "ERR_CERT_AUTHORITY_INVALID"} and effective_proxy:
                     log_once("proxy-tls-hint-playwright", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
-                print(f"Playwright failed {clean_url}: {e}")
+                if bool(config.get("debug_logging", False)):
+                    print(f"Playwright failed {clean_url}: {message}")
             time.sleep(2)
-    return None, reason
+    return None, build_error_payload(code, message, hint)
 
 
 def fetch_page_selenium(url, proxy=None):
     if not HAS_SELENIUM:
         return None, "selenium_not_installed"
 
-    clean_url = validate_url(url)
+    clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not clean_url:
-        return None, "invalid_url"
+        return None, build_error_payload("INVALID_TARGET", reason or "invalid target", reason or "invalid target")
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
@@ -152,13 +144,16 @@ def fetch_page_selenium(url, proxy=None):
         driver.quit()
         return html, None
     except Exception as e:
-        message = str(e)
+        code, message, hint = classify_browser_error(e)
         if "driver" in message.lower() or "chromedriver" in message.lower():
             message = f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json"
+            code = "DRIVER_ERROR"
+            hint = "browser driver is missing or misconfigured"
         if any(token in str(e).lower() for token in ("ssl", "tls", "certificate", "cert")) and effective_proxy:
             log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS")
-        print(f"Selenium failed {clean_url}: {message}")
-        return None, "selenium_error"
+        if bool(config.get("debug_logging", False)):
+            print(f"Selenium failed {clean_url}: {message}")
+        return None, build_error_payload(code, message, hint)
 
 
 def solve_captcha(soup, url):
@@ -205,3 +200,32 @@ def solve_captcha(soup, url):
             print(f"2Captcha failed: {e}")
 
     return token
+ERROR_SIGNATURES = {
+    "ERR_CONNECTION_CLOSED": ["err_connection_closed", "connection closed"],
+    "ERR_NAME_NOT_RESOLVED": ["err_name_not_resolved", "name not resolved"],
+    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH": ["err_ssl_version_or_cipher_mismatch", "ssl version", "cipher mismatch"],
+    "ERR_CERT_AUTHORITY_INVALID": ["err_cert_authority_invalid", "certificate", "authority invalid", "net::err_cert"],
+    "ERR_SOCKS_CONNECTION_FAILED": ["err_socks_connection_failed", "socks"],
+}
+
+ERROR_HINTS = {
+    "ERR_CONNECTION_CLOSED": "remote endpoint closed the connection",
+    "ERR_NAME_NOT_RESOLVED": "hostname could not be resolved",
+    "ERR_SSL_VERSION_OR_CIPHER_MISMATCH": "TLS settings are incompatible",
+    "ERR_CERT_AUTHORITY_INVALID": "certificate trust validation failed",
+    "ERR_SOCKS_CONNECTION_FAILED": "proxy tunnel failed",
+    "UNKNOWN_FETCH_ERROR": "network or browser error",
+}
+
+
+def classify_browser_error(exc):
+    message = str(exc).strip()
+    lowered = message.lower()
+    for code, markers in ERROR_SIGNATURES.items():
+        if any(marker in lowered for marker in markers):
+            return code, message, ERROR_HINTS.get(code, "browser navigation failure")
+    return "UNKNOWN_FETCH_ERROR", message, ERROR_HINTS["UNKNOWN_FETCH_ERROR"]
+
+
+def build_error_payload(code, message, hint):
+    return {"code": code, "message": message, "hint": hint}

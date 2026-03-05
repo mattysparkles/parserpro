@@ -108,6 +108,52 @@ def validate_url(value):
     return urlunparse(parsed)
 
 
+def normalize_and_validate_target(raw, allow_nonstandard_ports=False):
+    if raw is None:
+        return None, "empty target"
+
+    candidate = str(raw).strip()
+    if not candidate:
+        return None, "empty target"
+
+    lowered = candidate.lower()
+    bad_markers = ["{", "}", "\n", "tostring:function", "[object", "major:"]
+    if any(marker in lowered for marker in bad_markers):
+        return None, "invalid target format"
+
+    if " " in candidate:
+        return None, "invalid target format"
+
+    if not candidate.startswith(("http://", "https://")):
+        if candidate.startswith("//"):
+            candidate = f"https:{candidate}"
+        elif "." in candidate and not candidate.startswith("/"):
+            candidate = f"https://{candidate.lstrip('/')}"
+        else:
+            return None, "missing http/https scheme"
+
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return None, "invalid URL parse"
+
+    if parsed.scheme not in {"http", "https"}:
+        return None, "unsupported scheme"
+
+    if not parsed.netloc:
+        return None, "missing host"
+
+    try:
+        port = parsed.port
+    except ValueError:
+        return None, "invalid port"
+
+    if port and port not in {80, 443} and not allow_nonstandard_ports:
+        return None, "nonstandard port (likely non-web service)"
+
+    return urlunparse(parsed), None
+
+
 def log_once(key, message):
     if key in _LOGGED_ONCE_KEYS:
         return
