@@ -237,19 +237,23 @@ Suggested next improvements:
 
 ## Auto-setup and runtime safety (new)
 
-- **Hydra auto-detection/install**: `main.py` now runs `check_and_setup_prerequisites()` before GUI startup (and headless startup), then runner checks again before execution.
-  - On Windows it prefers **WSL Hydra** when available (`wsl hydra --version`).
-  - If missing in WSL, it attempts: `wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y hydra"`.
-  - If native Hydra is missing, it attempts to download/extract a Windows release under `tools/hydra` and updates PATH (`setx`).
-  - If PATH was updated, you may need to restart your shell/app session.
+- **Hydra auto-detection/install**: `main.py` runs startup checks before GUI/headless flow and follows this order on Windows:
+  1. Run `wsl --list --quiet` and enumerate installed distros.
+  2. For each distro, run `wsl -d <distro> hydra --version`.
+  3. If Hydra exists in a distro, that distro is selected for runner execution (`wsl -d <found_distro> bash -lc ...`).
+  4. If Hydra is missing in all distros, it attempts install in the first distro with `wsl -d <distro> -- bash -lc "sudo apt update && sudo apt install -y hydra"`.
+  5. If WSL is unavailable or install fails, it falls back to native Windows Hydra by downloading `https://github.com/maaaaz/thc-hydra-windows/releases/download/v9.1/hydra-9.1-win.zip`, extracting under `tools/hydra`, and appending that directory to process `PATH`.
+- **Runner-safe behavior**: if Hydra is still unavailable after all attempts, GUI still loads but Hydra Runner is disabled and shows a warning message when user tries to run commands.
+- **User prompts**: startup uses `messagebox.showinfo` for successful install notifications and restart guidance when native PATH changes might require a fresh shell/app session.
 - **Selenium/Chromedriver auto-setup**: uses `webdriver_manager.chrome` to provision Chromedriver when not manually configured.
-- **NordVPN on Windows**: now checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and raises a startup warning dialog with manual steps.
+- **NordVPN on Windows**: checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and raises a startup warning dialog with manual steps.
 - **Form method handling**: non-POST forms are retained, and Hydra templates use:
   - `http-post-form` for POST
   - `http-get-form` for GET
   GET forms are marked with a warning that manual tuning may be required.
 - **Runner timeout/termination**: each Hydra process has a default 1-hour timeout (`hydra_timeout_seconds`, default `3600`) and is cleanly terminated on timeout/cancel/exit.
 - **Graceful shutdown**: window close now attempts to stop running subprocesses, terminate gost, and disconnect NordVPN CLI sessions.
+
 
 ### New config flags
 
