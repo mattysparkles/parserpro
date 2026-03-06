@@ -234,6 +234,34 @@ Suggested next improvements:
 - Migrate modules into a package directory (`src/parserpro/`) if distribution is planned.
 
 
+
+## Auto-setup and runtime safety (new)
+
+- **Hydra auto-detection/install**: ParserPro now checks Hydra availability on startup/runner start.
+  - On Windows it prefers **WSL Hydra** when available (`wsl hydra --version`).
+  - If missing in WSL, it attempts: `wsl -d Ubuntu -- sudo apt update && sudo apt install -y hydra`.
+  - If native Hydra is missing, it attempts to download/extract a Windows release under `tools/hydra` and updates PATH (`setx`).
+  - If PATH was updated, you may need to restart your shell/app session.
+- **Selenium/Chromedriver auto-setup**: uses `webdriver_manager.chrome` to provision Chromedriver when not manually configured.
+- **NordVPN on Windows**: now checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and warns in the GUI.
+- **Form method handling**: non-POST forms are retained, and Hydra templates use:
+  - `http-post-form` for POST
+  - `http-get-form` for GET
+  GET forms are marked with a warning that manual tuning may be required.
+- **Runner timeout/termination**: each Hydra process has a default 1-hour timeout (`hydra_timeout_seconds`, default `3600`) and is cleanly terminated on timeout/cancel/exit.
+- **Graceful shutdown**: window close now attempts to stop running subprocesses, terminate gost, and disconnect NordVPN CLI sessions.
+
+### New config flags
+
+In `data/config.json`:
+
+- `startup_dependency_checks` (default `true`)
+- `prefer_wsl_hydra` (default `true`)
+- `auto_install_hydra` (default `true`)
+- `hydra_timeout_seconds` (default `3600`)
+- `auto_setup_chromedriver` (default `true`)
+- `auto_configure_nordvpn_path` (default `true`)
+
 ## Troubleshooting
 
 - **Selenium: `WebDriver.__init__() got multiple values for argument options`**

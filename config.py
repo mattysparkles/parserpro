@@ -1,10 +1,14 @@
 import json
+import os
 import platform
+import shutil
 import socket
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
+import webbrowser
 
 import requests
 
@@ -25,8 +29,11 @@ LEGACY_PROCESSED_SITES_FILE = APP_DIR / "processed_sites.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 PROCESSED_SITES_FILE = DATA_DIR / "processed_sites.json"
 GOST_RELEASE_API = "https://api.github.com/repos/ginuerzh/gost/releases/latest"
+HYDRA_RELEASE_API = "https://api.github.com/repos/vanhauser-thc/thc-hydra/releases/latest"
+HYDRA_WINDOWS_DIR = APP_DIR / "tools" / "hydra"
 GOST_ARCHIVE_CACHE = DATA_DIR / "downloads"
 GOST_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+HYDRA_WINDOWS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_gost_binary_path():
@@ -138,6 +145,12 @@ def load_config():
     loaded.setdefault("analysis_mode", "static")
     loaded.setdefault("observation_enable_dummy_interaction", False)
     loaded.setdefault("observation_allowlisted_domains", [])
+    loaded.setdefault("startup_dependency_checks", True)
+    loaded.setdefault("prefer_wsl_hydra", True)
+    loaded.setdefault("auto_install_hydra", True)
+    loaded.setdefault("hydra_timeout_seconds", 3600)
+    loaded.setdefault("auto_setup_chromedriver", True)
+    loaded.setdefault("auto_configure_nordvpn_path", True)
     return loaded
 
 
@@ -148,6 +161,162 @@ logger.set_debug(bool(config.get("debug_logging", False)))
 def save_config():
     logger.set_debug(bool(config.get("debug_logging", False)))
     CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def _run_cmd(command, timeout=30):
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+
+def _wsl_available() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        res = _run_cmd(["wsl", "--status"], timeout=10)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _hydra_available_native() -> bool:
+    if shutil.which("hydra"):
+        return True
+    win_hydra = HYDRA_WINDOWS_DIR / "hydra.exe"
+    return win_hydra.exists()
+
+
+def _hydra_available_wsl() -> bool:
+    if not _wsl_available():
+        return False
+    try:
+        res = _run_cmd(["wsl", "hydra", "--version"], timeout=15)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _install_hydra_wsl(log_func=None) -> bool:
+    if not _wsl_available():
+        return False
+    try:
+        if log_func:
+            log_func("Hydra missing in WSL; attempting automatic install on Ubuntu...")
+        res = _run_cmd(["wsl", "-d", "Ubuntu", "bash", "-lc", "sudo apt update && sudo apt install -y hydra"], timeout=600)
+        ok = res.returncode == 0
+        if log_func:
+            log_func("WSL Hydra install completed." if ok else f"WSL Hydra install failed: {(res.stderr or res.stdout).strip()[:220]}")
+        return ok
+    except Exception as exc:
+        if log_func:
+            log_func(f"WSL Hydra install error: {exc}")
+        return False
+
+
+def _download_hydra_windows_binary(log_func=None):
+    try:
+        resp = requests.get(HYDRA_RELEASE_API, timeout=30)
+        resp.raise_for_status()
+        release = resp.json()
+    except Exception as exc:
+        if log_func:
+            log_func(f"Hydra release lookup failed: {exc}")
+        return None
+
+    assets = release.get("assets") or []
+    preferred = [a for a in assets if "win" in (a.get("name") or "").lower() and (a.get("name") or "").lower().endswith(".zip")]
+    if not preferred:
+        if log_func:
+            log_func("No official Windows Hydra release asset was found on latest release.")
+        return None
+
+    asset = preferred[0]
+    archive_path = GOST_ARCHIVE_CACHE / asset["name"]
+    try:
+        if log_func:
+            log_func(f"Downloading Hydra Windows binary: {asset['name']}")
+        with requests.get(asset["browser_download_url"], stream=True, timeout=120) as req:
+            req.raise_for_status()
+            with archive_path.open("wb") as fh:
+                for chunk in req.iter_content(chunk_size=8192):
+                    if chunk:
+                        fh.write(chunk)
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(HYDRA_WINDOWS_DIR)
+        for file in HYDRA_WINDOWS_DIR.rglob("hydra.exe"):
+            return file
+    except Exception as exc:
+        if log_func:
+            log_func(f"Hydra Windows install failed: {exc}")
+    return None
+
+
+def _add_dir_to_path_windows(path_obj: Path) -> bool:
+    target = str(path_obj)
+    path_now = os.environ.get("PATH", "")
+    if target.lower() in path_now.lower():
+        return False
+    try:
+        merged = f"{path_now};{target}"
+        subprocess.run(["setx", "PATH", merged], capture_output=True, text=True, timeout=30)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_hydra_available(log_func=None):
+    """Ensure Hydra is callable, preferring WSL on Windows when available."""
+    prefer_wsl = bool(config.get("prefer_wsl_hydra", True))
+    auto_install = bool(config.get("auto_install_hydra", True))
+
+    if prefer_wsl and _hydra_available_wsl():
+        return {"available": True, "mode": "wsl", "message": "Hydra available in WSL"}
+    if _hydra_available_native():
+        return {"available": True, "mode": "native", "message": "Hydra available natively"}
+
+    if auto_install and prefer_wsl and _wsl_available() and _install_hydra_wsl(log_func=log_func) and _hydra_available_wsl():
+        return {"available": True, "mode": "wsl", "message": "Hydra installed in WSL"}
+
+    if auto_install and os.name == "nt":
+        hydra_exe = _download_hydra_windows_binary(log_func=log_func)
+        if hydra_exe:
+            restart_needed = _add_dir_to_path_windows(hydra_exe.parent)
+            message = "Hydra installed natively on Windows"
+            if restart_needed:
+                message += "; restart may be required for PATH update"
+            return {
+                "available": True,
+                "mode": "native",
+                "message": message,
+                "path_updated": restart_needed,
+            }
+
+    return {"available": False, "mode": None, "message": "Hydra not found (native or WSL)"}
+
+
+def ensure_nordvpn_cli(log_func=None):
+    """Resolve NordVPN CLI path on Windows and optionally add install directory to PATH."""
+    candidates = [
+        shutil.which("nordvpn"),
+        shutil.which("nordvpncli"),
+        r"C:\Program Files\NordVPN\nordvpn.exe",
+        r"C:\Program Files\NordVPN\NordVPN.exe",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path_obj = Path(candidate)
+        if not path_obj.exists() and os.path.sep in str(candidate):
+            continue
+        if os.name == "nt" and bool(config.get("auto_configure_nordvpn_path", True)):
+            _add_dir_to_path_windows(path_obj.parent)
+        return {"available": True, "path": str(path_obj)}
+
+    if log_func:
+        log_func("NordVPN CLI not found. Opening download page for installation.")
+    try:
+        webbrowser.open("https://nordvpn.com/download/windows/")
+    except Exception:
+        pass
+    return {"available": False, "path": None}
 
 
 def download_gost():
