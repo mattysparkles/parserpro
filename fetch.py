@@ -12,7 +12,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 from app_logging import logger, log_once
-from config import config, get_effective_proxy
+from config import config, get_intercept_proxy
 from helpers import USER_AGENTS, normalize_and_validate_target
 
 try:
@@ -154,9 +154,7 @@ def fetch_page_playwright(url, proxy=None):
         return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
-        effective_proxy = get_effective_proxy(config, proxy)
-        if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
-            effective_proxy = {"server": config.get("burp_proxy", "").strip()}
+        effective_proxy = get_intercept_proxy(config, proxy)
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
@@ -215,9 +213,7 @@ def fetch_page_selenium(url, proxy=None):
         return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
-        effective_proxy = get_effective_proxy(config, proxy)
-        if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
-            effective_proxy = {"server": config.get("burp_proxy", "").strip()}
+        effective_proxy = get_intercept_proxy(config, proxy)
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 

@@ -111,6 +111,15 @@ def get_effective_proxy(cfg, runtime_proxy=None, fail_fast=None):
     return None
 
 
+
+def get_intercept_proxy(cfg, runtime_proxy=None, fail_fast=None):
+    """Resolve Burp/ZAP/general proxy with Burp taking precedence when both are enabled."""
+    if bool((cfg or {}).get("use_burp", False)) and str((cfg or {}).get("burp_proxy", "")).strip():
+        return {"server": str(cfg.get("burp_proxy")).strip()}
+    if bool((cfg or {}).get("use_zap", False)) and str((cfg or {}).get("zap_proxy", "")).strip():
+        return {"server": str(cfg.get("zap_proxy")).strip()}
+    return get_effective_proxy(cfg, runtime_proxy=runtime_proxy, fail_fast=fail_fast)
+
 def _migrate_legacy_config_once():
     if not CONFIG_FILE.exists() and LEGACY_CONFIG_FILE.exists():
         CONFIG_FILE.write_text(LEGACY_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
@@ -131,7 +140,11 @@ def load_config():
     loaded.setdefault("proxy_url", "")
     loaded.setdefault("proxy_required", False)
     loaded.setdefault("use_burp", False)
-    loaded.setdefault("burp_proxy", "")
+    loaded.setdefault("burp_proxy", "http://127.0.0.1:8080")
+    loaded.setdefault("use_zap", False)
+    loaded.setdefault("zap_proxy", "http://127.0.0.1:8080")
+    loaded.setdefault("zap_api_key", "")
+    loaded.setdefault("auto_start_zap_daemon", False)
     loaded.setdefault("proxy_rotation", False)
     loaded.setdefault("proxy_list_file", "")
     loaded.setdefault("anticaptcha_key", "")

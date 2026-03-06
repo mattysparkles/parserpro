@@ -386,9 +386,13 @@ class RunnerMixin:
                 cmd,
                 count=1,
             )
-            burp_proxy = config.get("burp_proxy", "").strip() if bool(config.get("use_burp", False)) else ""
-            if burp_proxy and " -p " not in f" {cmd} ":
-                cmd = f"{cmd} -p {burp_proxy}"
+            intercept_proxy = ""
+            if bool(config.get("use_burp", False)):
+                intercept_proxy = config.get("burp_proxy", "").strip()
+            elif bool(config.get("use_zap", False)):
+                intercept_proxy = config.get("zap_proxy", "").strip()
+            if intercept_proxy and " -p " not in f" {cmd} ":
+                cmd = f"{cmd} -p {intercept_proxy}"
             if bool(config.get("proxy_rotation", False)) and config.get("proxy_list_file", "").strip():
                 from proxies import ProxyManager
 

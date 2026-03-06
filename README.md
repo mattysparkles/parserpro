@@ -333,3 +333,29 @@ The tab shows category counts, top failing domains, per-site details, static rec
 
 - **Retry Failed** (re-queues failed sites using existing controls)
 - **Export Diagnostics CSV**
+
+## Burp + ZAP + Credential Testing (new)
+
+- Added dedicated GUI tabs:
+  - **Burp Tester**: launch Burp Suite Community and export current extracted target data (`data/burp_import.json`).
+  - **ZAP Tester**: launch OWASP ZAP (optionally daemon mode) and import current targets into ZAP API active scans.
+- Settings now include:
+  - `use_burp`, `burp_proxy` (default `http://127.0.0.1:8080`)
+  - `use_zap`, `zap_proxy` (default `http://127.0.0.1:8080`)
+  - `zap_api_key`, `auto_start_zap_daemon`
+- Unified proxy routing: Playwright, Selenium, extraction pipeline, and Hydra runner now respect interceptor preference (`Burp` first if enabled, otherwise `ZAP`, otherwise normal proxy settings).
+- Login flow analyzer now supports GET/POST/other methods:
+  - Generates Hydra `http-get-form`/`http-post-form` when supported.
+  - Marks unsupported methods for custom testing.
+- Added GUI action **Test Credentials (Selected Site)**:
+  - Uses per-site combos against extracted form fields.
+  - Saves successful entries to `hits/hits_<domain>.txt` including method used.
+
+### Burp CA certificate note
+
+For HTTPS interception, install Burp's CA certificate into the trust store used by your browser/tooling environment. Without this, TLS requests may fail or be blocked. On Python clients you can also point to a trusted CA file using `REQUESTS_CA_BUNDLE`.
+
+### Windows-first notes
+
+- Burp/ZAP launch uses Windows executable/batch detection first and `shell=True` where appropriate.
+- Linux/macOS paths fall back to `burpsuite` / `zaproxy` style commands when available.

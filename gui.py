@@ -17,9 +17,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_vpn_control, save_config
-from extract import extract_login_form
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_intercept_proxy, get_vpn_control, save_config
+from extract import extract_login_form, test_credentials_for_site
 from fetch import ensure_chromedriver_available
+from burp import BURP_DOWNLOAD_URL, launch_burp
+from zap import import_data_to_zap, launch_zap
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
 from proxies import ProxyManager
@@ -90,6 +92,10 @@ class CombinedParserGUI(RunnerMixin):
         self.force_recheck = tk.BooleanVar(value=bool(config.get("force_recheck", False)))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         self.use_burp = tk.BooleanVar(value=bool(config.get("use_burp", False)))
+        self.zap_proxy = tk.StringVar(value=config.get("zap_proxy", "http://127.0.0.1:8080"))
+        self.use_zap = tk.BooleanVar(value=bool(config.get("use_zap", False)))
+        self.zap_api_key = tk.StringVar(value=config.get("zap_api_key", ""))
+        self.auto_start_zap_daemon = tk.BooleanVar(value=bool(config.get("auto_start_zap_daemon", False)))
         self.proxy_rotation = tk.BooleanVar(value=bool(config.get("proxy_rotation", False)))
         self.proxy_list_file = tk.StringVar(value=config.get("proxy_list_file", ""))
         self.show_debug_details = tk.BooleanVar(value=False)
@@ -468,6 +474,12 @@ class CombinedParserGUI(RunnerMixin):
         runner_tab = ttk.Frame(notebook)
         notebook.add(runner_tab, text="Hydra Runner")
 
+        burp_tab = ttk.Frame(notebook)
+        notebook.add(burp_tab, text="Burp Tester")
+
+        zap_tab = ttk.Frame(notebook)
+        notebook.add(zap_tab, text="ZAP Tester")
+
         troubleshooting_tab = ttk.Frame(notebook)
         notebook.add(troubleshooting_tab, text="Troubleshooting")
 
@@ -476,6 +488,8 @@ class CombinedParserGUI(RunnerMixin):
 
         self.build_extractor_tab(extractor_tab)
         self.build_runner_tab(runner_tab)
+        self.build_burp_tab(burp_tab)
+        self.build_zap_tab(zap_tab)
         self.build_troubleshooting_tab(troubleshooting_tab)
         self.build_timeline_tab(timeline_tab)
 
@@ -621,6 +635,7 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button = ttk.Button(btn_f, text="Resume Failed", command=self.resume_failed)
         self.retry_button.pack(side="left", padx=4)
         ttk.Button(btn_f, text="Settings", command=self.open_settings).pack(side="left", padx=4)
+        ttk.Button(btn_f, text="Test Credentials (Selected Site)", command=self.on_test_credentials_selected).pack(side="left", padx=4)
         ttk.Button(btn_f, text="Clear Log", command=self.clear_log).pack(side="left", padx=4)
 
         self.progress = ttk.Progressbar(action_row, orient="horizontal", mode="determinate")
@@ -640,6 +655,24 @@ class CombinedParserGUI(RunnerMixin):
         log_x.grid(row=1, column=0, sticky="ew")
         self.log.configure(yscrollcommand=log_y.set, xscrollcommand=log_x.set)
         self._bind_scroll_wheel(self.log)
+
+    def on_test_credentials_selected(self):
+        if not self.runner_rows_all:
+            self.refresh_runner_list()
+        selected = [r.get("site") for r in self.runner_rows_all if r.get("selected")]
+        if not selected:
+            messagebox.showinfo("Credential Test", "Select a site in Hydra Runner first.")
+            return
+        site = selected[0]
+        pdata = (self.processed_data or {}).get(site) or {}
+        extracted = pdata.get("extracted") or {}
+        combo_path = pdata.get("combo_path")
+        if not combo_path or not Path(combo_path).exists():
+            messagebox.showerror("Credential Test", f"Combo file missing for {site}")
+            return
+        combos = [ln.strip() for ln in Path(combo_path).read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+        result = test_credentials_for_site(extracted, combos)
+        messagebox.showinfo("Credential Test", f"{site}: hits={result.get('hits',0)} status={result.get('status')}")
 
     def open_settings(self):
         settings_window = tk.Toplevel(self.root)
@@ -741,7 +774,15 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Label(proxy_rotation_frame, text="Burp Proxy (optional, e.g. http://127.0.0.1:8080)").pack(anchor="w", padx=10, pady=(8, 2))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         ttk.Entry(proxy_rotation_frame, textvariable=self.burp_proxy).pack(fill="x", padx=10, pady=(0, 8))
-        ttk.Checkbutton(proxy_rotation_frame, text="Route all requests through Burp", variable=self.use_burp).pack(anchor="w", padx=10, pady=3)
+        ttk.Checkbutton(proxy_rotation_frame, text="Enable Burp Proxy", variable=self.use_burp).pack(anchor="w", padx=10, pady=3)
+
+        ttk.Label(proxy_rotation_frame, text="ZAP Proxy (optional, e.g. http://127.0.0.1:8080)").pack(anchor="w", padx=10, pady=(8, 2))
+        self.zap_proxy = tk.StringVar(value=config.get("zap_proxy", "http://127.0.0.1:8080"))
+        ttk.Entry(proxy_rotation_frame, textvariable=self.zap_proxy).pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Checkbutton(proxy_rotation_frame, text="Enable ZAP Proxy", variable=self.use_zap).pack(anchor="w", padx=10, pady=3)
+        ttk.Label(proxy_rotation_frame, text="ZAP API Key (optional)").pack(anchor="w", padx=10, pady=(6, 2))
+        ttk.Entry(proxy_rotation_frame, textvariable=self.zap_api_key).pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Checkbutton(proxy_rotation_frame, text="Auto-start ZAP daemon", variable=self.auto_start_zap_daemon).pack(anchor="w", padx=10, pady=3)
 
         ttk.Checkbutton(proxy_rotation_frame, text="Enable proxy rotation", variable=self.proxy_rotation).pack(anchor="w", padx=10, pady=3)
         ttk.Label(proxy_rotation_frame, text="Proxy list file (one proxy per line)").pack(anchor="w", padx=10, pady=(6, 2))
@@ -753,6 +794,73 @@ class CombinedParserGUI(RunnerMixin):
         action_row = ttk.Frame(content)
         action_row.pack(fill="x", padx=6, pady=(12, 8))
         ttk.Button(action_row, text="Save & Close", command=self.save_settings).pack(side="right")
+
+    def build_burp_tab(self, tab):
+        frame = ttk.Frame(tab, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Burp Suite Community Integration", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(frame, text="Use this tab to launch Burp and export extracted form/command data.").pack(anchor="w", pady=(0, 10))
+        ttk.Button(frame, text="Launch Burp Suite", command=self.on_launch_burp).pack(anchor="w", pady=4)
+        ttk.Button(frame, text="Send current data to Burp", command=self.on_send_current_data_to_burp).pack(anchor="w", pady=4)
+
+    def build_zap_tab(self, tab):
+        frame = ttk.Frame(tab, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="OWASP ZAP Integration", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(frame, text="Launch ZAP and queue extracted URLs for active scan via API.").pack(anchor="w", pady=(0, 10))
+        ttk.Button(frame, text="Launch OWASP ZAP", command=self.on_launch_zap).pack(anchor="w", pady=4)
+        ttk.Button(frame, text="Import current data to ZAP", command=self.on_import_current_data_to_zap).pack(anchor="w", pady=4)
+
+    def on_launch_burp(self):
+        ok, msg = launch_burp()
+        (messagebox.showinfo if ok else messagebox.showwarning)("Burp", msg)
+        if not ok:
+            self._write_log_threadsafe(f"Burp launch fallback. Download: {BURP_DOWNLOAD_URL}")
+
+    def _current_extracted_targets(self):
+        targets = []
+        for site, item in (self.processed_data or {}).items():
+            extracted = (item or {}).get("extracted") or {}
+            if extracted:
+                targets.append({
+                    "site": site,
+                    "action_url": extracted.get("action_url") or extracted.get("action") or extracted.get("original_url"),
+                    "method": extracted.get("method", "post"),
+                    "post_data": extracted.get("post_data", ""),
+                })
+        return targets
+
+    def on_send_current_data_to_burp(self):
+        targets = self._current_extracted_targets()
+        if not targets:
+            messagebox.showinfo("Burp", "No extracted data available yet.")
+            return
+        out = DATA_DIR / "burp_import.json"
+        out.write_text(json.dumps({"targets": targets}, indent=2), encoding="utf-8")
+        messagebox.showinfo("Burp", f"Exported {len(targets)} targets to {out}")
+
+    def on_launch_zap(self):
+        ok, msg = launch_zap(
+            daemon=bool(config.get("auto_start_zap_daemon", False)),
+            proxy_url=config.get("zap_proxy", "http://127.0.0.1:8080"),
+            api_key=config.get("zap_api_key", ""),
+        )
+        (messagebox.showinfo if ok else messagebox.showwarning)("ZAP", msg)
+
+    def on_import_current_data_to_zap(self):
+        targets = self._current_extracted_targets()
+        if not targets:
+            messagebox.showinfo("ZAP", "No extracted data available yet.")
+            return
+        try:
+            ok, msg = import_data_to_zap(
+                proxy_url=config.get("zap_proxy", "http://127.0.0.1:8080"),
+                api_key=config.get("zap_api_key", ""),
+                targets=targets,
+            )
+            (messagebox.showinfo if ok else messagebox.showwarning)("ZAP", msg)
+        except Exception as exc:
+            messagebox.showerror("ZAP", f"Failed to import into ZAP: {exc}")
 
     def choose_proxy_list_file(self):
         fp = filedialog.askopenfilename(filetypes=[("Text", "*.txt"), ("All", "*.*")])
@@ -775,6 +883,10 @@ class CombinedParserGUI(RunnerMixin):
         config['force_recheck'] = bool(self.force_recheck.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['use_burp'] = bool(self.use_burp.get())
+        config['zap_proxy'] = self.zap_proxy.get().strip()
+        config['use_zap'] = bool(self.use_zap.get())
+        config['zap_api_key'] = self.zap_api_key.get().strip()
+        config['auto_start_zap_daemon'] = bool(self.auto_start_zap_daemon.get())
         config['proxy_rotation'] = bool(self.proxy_rotation.get())
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
@@ -908,6 +1020,8 @@ class CombinedParserGUI(RunnerMixin):
             "proxy_url": config.get("proxy_url", ""),
             "burp_proxy": config.get("burp_proxy", ""),
             "use_burp": bool(config.get("use_burp", False)),
+            "zap_proxy": config.get("zap_proxy", ""),
+            "use_zap": bool(config.get("use_zap", False)),
             "proxy_rotation": bool(config.get("proxy_rotation", False)),
             "proxy_list_file": config.get("proxy_list_file", ""),
             "autosave_enabled": self.autosave_enabled.get(),
@@ -1751,9 +1865,7 @@ class CombinedParserGUI(RunnerMixin):
             if get_vpn_control(config) == "none" and config.get("proxy_url", "").strip():
                 self._write_log_threadsafe(f"Using configured proxy_url for extraction: {config.get('proxy_url', '').strip()}")
 
-            proxy = get_effective_proxy(config, proxy_candidate)
-            if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
-                proxy = {"server": config.get("burp_proxy", "").strip()}
+            proxy = get_intercept_proxy(config, proxy_candidate)
             self.proxy_manager = None
             if bool(config.get("proxy_rotation", False)) and config.get("proxy_list_file", "").strip():
                 self.proxy_manager = ProxyManager(config.get("proxy_list_file", "").strip())

