@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -202,10 +203,17 @@ def build_wsl_command(inner_command: str, distro: str = "", username: str = "") 
     return cmd
 
 
-def build_wsl_sudo_command(base_command: str, password: str = "") -> str:
+def build_wsl_sudo_command(base_command: str, password: str = "", non_interactive: bool = False) -> str:
     if password:
         return f"echo {shlex.quote(password)} | sudo -S {base_command}"
+    if non_interactive:
+        return f"sudo -n {base_command}"
     return f"sudo {base_command}"
+
+
+def _is_apt_lock_error(output: str) -> bool:
+    message = (output or "").lower()
+    return "could not get lock" in message or "unable to lock" in message
 
 
 def _wsl_available() -> bool:
@@ -311,11 +319,39 @@ def _install_hydra_wsl(log_func=None) -> bool:
     try:
         if log_func:
             log_func(f"Hydra missing in WSL; attempting automatic install on {target}...")
-        sudo_install = build_wsl_sudo_command("apt update && apt install -y hydra", password=wsl_pass)
-        res = _run_cmd(build_wsl_command(sudo_install, distro=target, username=wsl_user), timeout=600)
-        ok = res.returncode == 0
+        install_command = (
+            "DEBIAN_FRONTEND=noninteractive "
+            "apt-get update -y && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y hydra"
+        )
+        sudo_install = build_wsl_sudo_command(
+            install_command,
+            password=wsl_pass,
+            non_interactive=not bool(wsl_pass),
+        )
+
+        attempts = 3
+        res = None
+        for attempt in range(1, attempts + 1):
+            res = _run_cmd(build_wsl_command(sudo_install, distro=target, username=wsl_user), timeout=600)
+            if res.returncode == 0:
+                break
+            output = f"{res.stderr or ''}\n{res.stdout or ''}"
+            if _is_apt_lock_error(output) and attempt < attempts:
+                if log_func:
+                    log_func(f"WSL apt is busy (attempt {attempt}/{attempts}); retrying in 5s...")
+                time.sleep(5)
+                continue
+            break
+
+        ok = bool(res) and res.returncode == 0
         if log_func:
-            log_func("WSL Hydra install completed." if ok else f"WSL Hydra install failed: {(res.stderr or res.stdout).strip()[:220]}")
+            if ok:
+                log_func("WSL Hydra install completed.")
+            elif not wsl_pass:
+                log_func("WSL Hydra install failed: sudo password required for auto-install (set wsl_password in settings).")
+            else:
+                log_func(f"WSL Hydra install failed: {(res.stderr or res.stdout).strip()[:220]}")
         if ok:
             config["wsl_hydra_distro"] = target
         return ok
