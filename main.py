@@ -66,7 +66,7 @@ def _log_note(notes: list[str], text: str, logger: logging.Logger | None = None)
         print(f"[startup] {text}")
 
 
-def check_and_setup_prerequisites(logger: logging.Logger | None = None) -> list[str]:
+def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dialogs: bool = True) -> list[str]:
     # FIX: Call centralized Hydra setup before UI loop/headless extraction.
     notes: list[str] = []
     hydra_status = check_and_setup_hydra(log_func=(logger.info if logger else None))
@@ -77,7 +77,7 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None) -> list[
         notes.append(warn)
         config["runner_enabled"] = False
         config["hydra_unavailable_message"] = warn
-        if not logger:
+        if show_dialogs and not logger:
             messagebox.showwarning("Hydra unavailable", warn)
 
     try:
@@ -212,7 +212,10 @@ def _schedule_gui_startup_checks(root: tk.Tk) -> None:
     results: queue.Queue[list[str]] = queue.Queue(maxsize=1)
 
     def _worker() -> None:
-        notes = check_and_setup_prerequisites()
+        try:
+            notes = check_and_setup_prerequisites(show_dialogs=False)
+        except Exception as exc:
+            notes = [f"Startup prerequisite checks failed: {exc}"]
         results.put(notes)
 
     def _poll_results() -> None:
