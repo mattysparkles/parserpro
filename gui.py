@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_intercept_proxy, get_vpn_control, save_config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
 from extract import extract_login_form, test_credentials_for_site
 from fetch import ensure_chromedriver_available
 from burp import BURP_DOWNLOAD_URL, launch_burp
@@ -165,33 +165,63 @@ class CombinedParserGUI(RunnerMixin):
 
     # NEW: startup dependency checks for Hydra/Chromedriver/NordVPN/proxy
     def run_startup_checks(self):
-        """Run lightweight startup checks and warn in GUI/log when dependencies are missing."""
+        """Run startup checks in the background so the UI stays responsive."""
         if not bool(config.get("startup_dependency_checks", True)):
             return
-        issues = []
-        hydra_status = ensure_hydra_available(log_func=self._write_log_threadsafe)
-        if not hydra_status.get("available"):
-            issues.append("Hydra unavailable (runner will not work)")
-        else:
-            self._write_log_threadsafe(f"Hydra check: {hydra_status.get('message')}")
 
-        ok_driver, driver_msg, _ = ensure_chromedriver_available()
-        if not ok_driver:
-            issues.append(f"Chromedriver auto-setup issue: {driver_msg}")
-        else:
-            self._write_log_threadsafe("Chromedriver check: ready")
+        self.status_text.set("Running startup checks (Hydra, chromedriver, VPN, proxy)...")
+        self.record_event("INFO", "ui", "startup_check_begin", "Startup checks started", {"async": True})
+        results: queue.Queue[tuple[list[str], str]] = queue.Queue(maxsize=1)
 
-        if get_vpn_control(config) == "nordvpn":
-            nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
-            if not nord.get("available"):
-                issues.append("NordVPN CLI missing (install required for vpn_control=nordvpn)")
+        def _worker():
+            issues = []
+            final_status = "Ready."
+            try:
+                hydra_status = ensure_hydra_available(log_func=self._write_log_threadsafe)
+                if not hydra_status.get("available"):
+                    issues.append("Hydra unavailable (runner will not work)")
+                else:
+                    self._write_log_threadsafe(f"Hydra check: {hydra_status.get('message')}")
 
-        if config.get("proxy_url", "").strip() and not get_effective_proxy(config, None):
-            issues.append("Configured proxy is unreachable; extraction will continue without it")
+                ok_driver, driver_msg, _ = ensure_chromedriver_available()
+                if not ok_driver:
+                    issues.append(f"Chromedriver auto-setup issue: {driver_msg}")
+                else:
+                    self._write_log_threadsafe("Chromedriver check: ready")
 
-        if issues:
-            self.record_event("WARN", "ui", "startup_check", "Startup dependency warnings", {"count": len(issues)})
-            messagebox.showerror("Startup checks", "\n".join(issues))
+                if get_vpn_control(config) == "nordvpn":
+                    nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
+                    if not nord.get("available"):
+                        issues.append("NordVPN CLI missing (install required for vpn_control=nordvpn)")
+
+                if config.get("proxy_url", "").strip() and not get_effective_proxy(config, None):
+                    issues.append("Configured proxy is unreachable; extraction will continue without it")
+
+                if issues:
+                    final_status = f"Startup checks finished with {len(issues)} warning(s)."
+                else:
+                    final_status = "Startup checks complete. Ready."
+            except Exception as exc:
+                issues.append(f"Startup checks failed: {exc}")
+                final_status = "Startup checks failed. See log for details."
+            results.put((issues, final_status))
+
+        def _poll_results():
+            try:
+                issues, final_status = results.get_nowait()
+            except queue.Empty:
+                self.root.after(200, _poll_results)
+                return
+
+            self.status_text.set(final_status)
+            if issues:
+                self.record_event("WARN", "ui", "startup_check", "Startup dependency warnings", {"count": len(issues)})
+                messagebox.showwarning("Startup checks", "\n".join(issues))
+            else:
+                self.record_event("INFO", "ui", "startup_check", "Startup dependency checks passed")
+
+        threading.Thread(target=_worker, name="gui-startup-checks", daemon=True).start()
+        self.root.after(200, _poll_results)
 
     def register_running_process(self, process):
         if process:
