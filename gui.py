@@ -202,34 +202,43 @@ class CombinedParserGUI(RunnerMixin):
             self.running_subprocesses.remove(process)
 
     def terminate_all_running_processes(self, reason):
-        # FIX: Re-entrancy guard to stop recursive terminate/log loops on close.
-        if self._cleaning_up and self._cleanup_log_emitted:
+        # FIX: Re-entrancy guard to stop recursive terminate/log loops on close/cancel.
+        self._cleaning_up = getattr(self, '_cleaning_up', False)
+        if self._cleaning_up:
             return
-        for proc in list(self.running_subprocesses):
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    time.sleep(0.5)
+        self._cleaning_up = True
+        try:
+            for proc in list(self.running_subprocesses):
+                try:
                     if proc.poll() is None:
-                        proc.kill()
-            except Exception:
-                pass
-            finally:
-                self.unregister_running_process(proc)
-        if self.gost_process:
-            try:
-                if self.gost_process.poll() is None:
-                    self.gost_process.terminate()
-                    time.sleep(0.2)
+                        proc.terminate()
+                        time.sleep(0.5)
+                        if proc.poll() is None:
+                            proc.kill()
+                except Exception:
+                    pass
+                finally:
+                    self.unregister_running_process(proc)
+            if self.gost_process:
+                try:
                     if self.gost_process.poll() is None:
-                        self.gost_process.kill()
-            except Exception:
-                pass
-            finally:
-                self.gost_process = None
-        if not self._cleanup_log_emitted:
-            self._cleanup_log_emitted = True
-            self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
+                        self.gost_process.terminate()
+                        time.sleep(0.2)
+                        if self.gost_process.poll() is None:
+                            self.gost_process.kill()
+                except Exception:
+                    pass
+                finally:
+                    self.gost_process = None
+            if not self._cleanup_log_emitted:
+                self._cleanup_log_emitted = True
+                try:
+                    self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
+                except Exception:
+                    # FIX: Avoid recursive logging failures during teardown.
+                    print(f"[cleanup] Terminated subprocesses: {reason}")
+        finally:
+            self._cleaning_up = False
 
     def load_processed_data(self):
         legacy_file = Path(__file__).resolve().parent / "processed_sites.json"
@@ -383,6 +392,7 @@ class CombinedParserGUI(RunnerMixin):
     def _write_log_threadsafe(self, text):
         # FIX: Avoid recursive UI/log churn while shutdown cleanup is active.
         if getattr(self, "_cleaning_up", False) and text.startswith("Terminated subprocesses:") and self._cleanup_log_emitted:
+            print(f"[cleanup-log] {text}")
             return
         if self.extract_log_file:
             with self.extract_log_file.open("a", encoding="utf-8") as fh:
@@ -1448,9 +1458,9 @@ class CombinedParserGUI(RunnerMixin):
 
     def on_exit(self):
         # FIX: Prevent recursive close handling when WM_DELETE_WINDOW fires repeatedly.
-        if self._cleaning_up:
+        if getattr(self, "_exit_requested", False):
             return
-        self._cleaning_up = True
+        self._exit_requested = True
         self._cleanup_log_emitted = False
         self.request_autosave()
         self.autosave_worker.stop()
@@ -1704,7 +1714,6 @@ class CombinedParserGUI(RunnerMixin):
         self.extract_log_file = None
         messagebox.showinfo("Pipeline Status", final_msg)
 
-        self._cleanup_log_emitted = False
         self.terminate_all_running_processes("pipeline cleanup")
         if get_vpn_control(config) == "nordvpn":
             cli_path = self._resolve_nordvpn_cli()

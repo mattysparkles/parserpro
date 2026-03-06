@@ -242,8 +242,9 @@ Suggested next improvements:
   2. For each distro, run `wsl -d <distro> hydra --version`.
   3. If Hydra exists in a distro, that distro is selected for runner execution (`wsl -d <found_distro> bash -lc ...`).
   4. If Hydra is missing in all distros, it attempts install in the first distro with `wsl -d <distro> -- bash -lc "sudo apt update && sudo apt install -y hydra"`.
-  5. If WSL is unavailable or install fails, it falls back to native Windows Hydra by downloading `https://github.com/maaaaz/thc-hydra-windows/releases/download/v9.1/hydra-9.1-win.zip`, extracting under `tools/hydra`, and appending that directory to process `PATH`.
+  5. If WSL is unavailable or install fails, it falls back to native Windows Hydra by fetching the latest ZIP from `https://github.com/maaaaz/thc-hydra-windows/releases`, extracting under `tools/hydra`, and appending that directory to process `PATH` (validated with `shutil.which("hydra")`).
 - **Runner-safe behavior**: if Hydra is still unavailable after all attempts, GUI still loads but Hydra Runner is disabled and shows a warning message when user tries to run commands.
+- Hydra auto-detected in WSL Kali or native; install manually if fails.
 - **User prompts**: startup uses `messagebox.showinfo` for successful install notifications and restart guidance when native PATH changes might require a fresh shell/app session.
 - **Selenium/Chromedriver auto-setup**: uses `webdriver_manager.chrome` to provision Chromedriver when not manually configured.
 - **NordVPN on Windows**: checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and raises a startup warning dialog with manual steps.

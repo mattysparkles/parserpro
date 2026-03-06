@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -30,6 +31,7 @@ CONFIG_FILE = DATA_DIR / "config.json"
 PROCESSED_SITES_FILE = DATA_DIR / "processed_sites.json"
 GOST_RELEASE_API = "https://api.github.com/repos/ginuerzh/gost/releases/latest"
 HYDRA_RELEASE_API = "https://api.github.com/repos/vanhauser-thc/thc-hydra/releases/latest"
+HYDRA_WINDOWS_RELEASES_API = "https://api.github.com/repos/maaaaz/thc-hydra-windows/releases/latest"
 HYDRA_WINDOWS_DIR = APP_DIR / "tools" / "hydra"
 GOST_ARCHIVE_CACHE = DATA_DIR / "downloads"
 GOST_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
@@ -207,16 +209,86 @@ def _hydra_available_wsl() -> bool:
         return False
 
 
-def _install_hydra_wsl(log_func=None) -> bool:
+def _normalize_wsl_distro_name(raw_name: str) -> str:
+    # FIX: Normalize malformed `wsl --list --quiet` entries like `k a l i - l i n u x`.
+    candidate = " ".join((raw_name or "").strip().split())
+    if not candidate:
+        return ""
+    candidate = candidate.replace("\x00", "")
+    candidate = re.sub(r"\s*-\s*", "-", candidate)
+    if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9\- ]*[A-Za-z0-9])?", candidate) and " " in candidate:
+        pieces = [p for p in candidate.split(" ") if p]
+        if pieces and all(len(p) == 1 or p == "-" for p in pieces):
+            candidate = "".join(pieces).replace("--", "-")
+    return candidate.strip()
+
+
+def _list_wsl_distros(log_func=None) -> list[str]:
+    # FIX: Parse distro names robustly and drop empty/garbled lines.
     if not _wsl_available():
+        return []
+    try:
+        res = _run_cmd(["wsl", "--list", "--quiet"], timeout=20)
+        if res.returncode != 0:
+            if log_func:
+                log_func(f"WSL distro listing failed: {(res.stderr or res.stdout).strip()[:220]}")
+            return []
+        seen = set()
+        distros = []
+        for line in (res.stdout or "").splitlines():
+            clean = _normalize_wsl_distro_name(line)
+            if clean and clean.lower() not in seen:
+                seen.add(clean.lower())
+                distros.append(clean)
+        if log_func:
+            log_func(f"Detected WSL distros: {', '.join(distros) if distros else 'none'}")
+        return distros
+    except Exception as exc:
+        if log_func:
+            log_func(f"WSL distro discovery error: {exc}")
+        return []
+
+
+def _prioritize_wsl_distros(distros: list[str]) -> list[str]:
+    # FIX: Prefer Kali distro first while still checking all installed distros.
+    kali = [d for d in distros if d.lower() == "kali-linux"]
+    others = [d for d in distros if d.lower() != "kali-linux"]
+    ubuntu = [d for d in others if d.lower() == "ubuntu"]
+    remaining = [d for d in others if d.lower() != "ubuntu"]
+    return kali + ubuntu + remaining
+
+
+def _hydra_available_wsl_distro(distro: str, log_func=None) -> bool:
+    try:
+        res = _run_cmd(["wsl", "-d", distro, "hydra", "--version"], timeout=20)
+        if res.returncode == 0:
+            if log_func:
+                log_func(f"Found Hydra in WSL {distro}")
+            return True
+        if log_func:
+            log_func(f"Hydra not found in WSL {distro}")
         return False
+    except Exception as exc:
+        if log_func:
+            log_func(f"Hydra check failed for WSL {distro}: {exc}")
+        return False
+
+
+def _install_hydra_wsl(log_func=None) -> bool:
+    # FIX: Install into preferred available distro (Kali first), not hard-coded Ubuntu.
+    distros = _prioritize_wsl_distros(_list_wsl_distros(log_func=log_func))
+    if not distros:
+        return False
+    target = distros[0]
     try:
         if log_func:
-            log_func("Hydra missing in WSL; attempting automatic install on Ubuntu...")
-        res = _run_cmd(["wsl", "-d", "Ubuntu", "bash", "-lc", "sudo apt update && sudo apt install -y hydra"], timeout=600)
+            log_func(f"Hydra missing in WSL; attempting automatic install on {target}...")
+        res = _run_cmd(["wsl", "-d", target, "bash", "-lc", "sudo apt update && sudo apt install -y hydra"], timeout=600)
         ok = res.returncode == 0
         if log_func:
             log_func("WSL Hydra install completed." if ok else f"WSL Hydra install failed: {(res.stderr or res.stdout).strip()[:220]}")
+        if ok:
+            config["wsl_hydra_distro"] = target
         return ok
     except Exception as exc:
         if log_func:
@@ -226,7 +298,8 @@ def _install_hydra_wsl(log_func=None) -> bool:
 
 def _download_hydra_windows_binary(log_func=None):
     try:
-        resp = requests.get(HYDRA_RELEASE_API, timeout=30)
+        # FIX: Use maintained Windows Hydra releases feed and latest ZIP asset.
+        resp = requests.get(HYDRA_WINDOWS_RELEASES_API, timeout=30)
         resp.raise_for_status()
         release = resp.json()
     except Exception as exc:
@@ -235,12 +308,13 @@ def _download_hydra_windows_binary(log_func=None):
         return None
 
     assets = release.get("assets") or []
-    preferred = [a for a in assets if "win" in (a.get("name") or "").lower() and (a.get("name") or "").lower().endswith(".zip")]
+    preferred = [a for a in assets if (a.get("name") or "").lower().endswith(".zip")]
     if not preferred:
         if log_func:
-            log_func("No official Windows Hydra release asset was found on latest release.")
+            log_func("No Windows Hydra ZIP asset found on latest maaaaz/thc-hydra-windows release.")
         return None
 
+    preferred.sort(key=lambda a: ("hydra" not in (a.get("name") or "").lower(), len(a.get("name") or "")))
     asset = preferred[0]
     archive_path = GOST_ARCHIVE_CACHE / asset["name"]
     try:
@@ -255,6 +329,8 @@ def _download_hydra_windows_binary(log_func=None):
         with zipfile.ZipFile(archive_path, "r") as zf:
             zf.extractall(HYDRA_WINDOWS_DIR)
         for file in HYDRA_WINDOWS_DIR.rglob("hydra.exe"):
+            if log_func:
+                log_func(f"Hydra extracted to {file.parent}")
             return file
     except Exception as exc:
         if log_func:
@@ -283,34 +359,68 @@ def _add_dir_to_path_windows(path_obj: Path) -> dict:
 
 def ensure_hydra_available(log_func=None):
     """Ensure Hydra is callable, preferring WSL on Windows when available."""
+    # FIX: Delegate to unified startup/setup flow so GUI and main share robust detection.
+    status = check_and_setup_hydra(log_func=log_func)
+    return {"available": status.get("available", False), "mode": status.get("mode"), "message": status.get("message", "")}
+
+
+def check_and_setup_hydra(log_func=None):
+    # FIX: Robust Hydra auto-detection/install for WSL + native Windows fallback.
     prefer_wsl = bool(config.get("prefer_wsl_hydra", True))
     auto_install = bool(config.get("auto_install_hydra", True))
+    os.environ.pop("PARSERPRO_WSL_DISTRO", None)
+    os.environ.pop("PARSERPRO_HYDRA_MODE", None)
+    config["runner_enabled"] = True
 
-    if prefer_wsl and _hydra_available_wsl():
-        return {"available": True, "mode": "wsl", "message": "Hydra available in WSL"}
+    if prefer_wsl and _wsl_available():
+        distros = _prioritize_wsl_distros(_list_wsl_distros(log_func=log_func))
+        for distro in distros:
+            if _hydra_available_wsl_distro(distro, log_func=log_func):
+                config["wsl_hydra_distro"] = distro
+                os.environ["PARSERPRO_HYDRA_MODE"] = "wsl"
+                os.environ["PARSERPRO_WSL_DISTRO"] = distro
+                return {"available": True, "mode": "wsl", "message": f"Found Hydra in WSL {distro}", "wsl_hydra_distro": distro}
+
+        if auto_install and distros:
+            install_target = distros[0]
+            if log_func:
+                log_func(f"Hydra not found in WSL distros; installing in {install_target}")
+            if _install_hydra_wsl(log_func=log_func) and _hydra_available_wsl_distro(install_target, log_func=log_func):
+                config["wsl_hydra_distro"] = install_target
+                os.environ["PARSERPRO_HYDRA_MODE"] = "wsl"
+                os.environ["PARSERPRO_WSL_DISTRO"] = install_target
+                return {"available": True, "mode": "wsl", "message": f"Hydra installed in WSL {install_target}", "wsl_hydra_distro": install_target}
+
     if _hydra_available_native():
+        os.environ["PARSERPRO_HYDRA_MODE"] = "native"
         return {"available": True, "mode": "native", "message": "Hydra available natively"}
-
-    if auto_install and prefer_wsl and _wsl_available() and _install_hydra_wsl(log_func=log_func) and _hydra_available_wsl():
-        return {"available": True, "mode": "wsl", "message": "Hydra installed in WSL"}
 
     if auto_install and os.name == "nt":
         hydra_exe = _download_hydra_windows_binary(log_func=log_func)
         if hydra_exe:
             path_result = _add_dir_to_path_windows(hydra_exe.parent)
+            verified = shutil.which("hydra") is not None
             message = "Hydra installed natively on Windows"
             if path_result.get("session_updated") and not path_result.get("persisted"):
                 message += "; session PATH updated (run setx PATH to persist and restart shells)"
             elif path_result.get("persisted"):
                 message += "; PATH persisted via setx (restart shells may be required)"
+            if log_func:
+                log_func(f"Native Hydra verification via which('hydra'): {verified}")
+            if verified:
+                os.environ["PARSERPRO_HYDRA_MODE"] = "native"
+            else:
+                message = "Hydra extract completed but hydra command was not found on PATH"
             return {
-                "available": True,
+                "available": verified,
                 "mode": "native",
                 "message": message,
                 "path_updated": bool(path_result.get("session_updated")),
                 "path_persisted": bool(path_result.get("persisted")),
             }
 
+    config["runner_enabled"] = False
+    config["hydra_unavailable_message"] = "Hydra not found (native or WSL)"
     return {"available": False, "mode": None, "message": "Hydra not found (native or WSL)"}
 
 
