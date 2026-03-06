@@ -217,6 +217,7 @@ def fetch_page_selenium(url, proxy=None):
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
+    driver = None
     try:
         options = Options()
         options.add_argument("--headless")
@@ -245,15 +246,24 @@ def fetch_page_selenium(url, proxy=None):
         else:
             driver = webdriver.Chrome(options=options)
 
+        # Prevent edge-case pages from blocking extraction indefinitely.
+        driver.set_page_load_timeout(35)
+
         driver.get(clean_url)
         time.sleep(5)
         html = driver.page_source
-        driver.quit()
         return html, None
     except Exception as e:
         stack = _debug_stack(f"Selenium failed {clean_url}", e)
         code, hint = classify_nav_error(str(e))
         message = str(e)
+        if "timeout" in message.lower():
+            return None, build_error_payload(
+                "fetch_timeout",
+                "Page load timed out",
+                "Selenium timed out while loading this page; skipped to keep extraction moving",
+                stacktrace=stack,
+            )
         if "driver" in message.lower() or "chromedriver" in message.lower():
             return None, build_error_payload(
                 "driver_error",
@@ -264,6 +274,12 @@ def fetch_page_selenium(url, proxy=None):
         if code in {"tls_mismatch", "cert_invalid"} and effective_proxy:
             log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS", level="WARN")
         return None, build_error_payload(code, hint, message, stacktrace=stack)
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
 def _solve_with_anticaptcha(captcha_type, sitekey, url):
