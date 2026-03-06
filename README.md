@@ -238,11 +238,12 @@ Suggested next improvements:
 ## Auto-setup and runtime safety (new)
 
 - **Hydra auto-detection/install**: `main.py` runs startup checks before GUI/headless flow and follows this order on Windows:
-  1. Run `wsl --list --quiet` and enumerate installed distros.
-  2. For each distro, run `wsl -d <distro> hydra --version`.
-  3. If Hydra exists in a distro, that distro is selected for runner execution (`wsl -d <found_distro> bash -lc ...`).
-  4. If Hydra is missing in all distros, it attempts install in the first distro with `wsl -d <distro> -- bash -lc "sudo apt update && sudo apt install -y hydra"`.
-  5. If WSL is unavailable or install fails, it falls back to native Windows Hydra by fetching the latest ZIP from `https://github.com/maaaaz/thc-hydra-windows/releases`, extracting under `tools/hydra`, and appending that directory to process `PATH` (validated with `shutil.which("hydra")`).
+  1. Check native Hydra first with `shutil.which("hydra")` and common folders (`C:\tools\hydra`, `C:\Program Files\Hydra`, `./tools/hydra/hydra.exe`).
+  2. If a native executable is found outside PATH, ParserPro auto-adds the folder to current process PATH and persists User PATH via PowerShell environment update.
+  3. Run `wsl --list --quiet`, robustly normalize distro names (including malformed spaced names), and prioritize Kali-like distro names.
+  4. For each valid distro, run `wsl -d <distro> hydra --version`; first success is stored as `wsl_hydra_distro`.
+  5. If no distro has Hydra, ParserPro installs with `sudo apt update && sudo apt install -y hydra` in preferred `kali-linux` when present (or first valid distro).
+  6. If WSL is unavailable or WSL install fails, it falls back to native Windows Hydra by downloading/extracting into `tools/hydra` and re-validating `shutil.which("hydra")` after PATH updates.
 - **Runner-safe behavior**: if Hydra is still unavailable after all attempts, GUI still loads but Hydra Runner is disabled and shows a warning message when user tries to run commands.
 - Hydra auto-detected in WSL Kali or native; install manually if fails.
 - **User prompts**: startup uses `messagebox.showinfo` for successful install notifications and restart guidance when native PATH changes might require a fresh shell/app session.
