@@ -2,6 +2,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -164,6 +165,8 @@ def load_config():
     loaded.setdefault("prefer_wsl_hydra", True)
     loaded.setdefault("auto_install_hydra", True)
     loaded.setdefault("hydra_timeout_seconds", 3600)
+    loaded.setdefault("wsl_username", "")
+    loaded.setdefault("wsl_password", "")
     loaded.setdefault("auto_setup_chromedriver", True)
     loaded.setdefault("auto_configure_nordvpn_path", True)
     return loaded
@@ -187,6 +190,22 @@ def _run_cmd(command, timeout=30):
         errors="replace",
         timeout=timeout,
     )
+
+
+def build_wsl_command(inner_command: str, distro: str = "", username: str = "") -> list[str]:
+    cmd = ["wsl"]
+    if distro:
+        cmd.extend(["-d", distro])
+    if username:
+        cmd.extend(["-u", username])
+    cmd.extend(["bash", "-lc", inner_command])
+    return cmd
+
+
+def build_wsl_sudo_command(base_command: str, password: str = "") -> str:
+    if password:
+        return f"echo {shlex.quote(password)} | sudo -S {base_command}"
+    return f"sudo {base_command}"
 
 
 def _wsl_available() -> bool:
@@ -287,10 +306,13 @@ def _install_hydra_wsl(log_func=None) -> bool:
     if not distros:
         return False
     target = distros[0]
+    wsl_user = str(config.get("wsl_username", "")).strip()
+    wsl_pass = str(config.get("wsl_password", ""))
     try:
         if log_func:
             log_func(f"Hydra missing in WSL; attempting automatic install on {target}...")
-        res = _run_cmd(["wsl", "-d", target, "bash", "-lc", "sudo apt update && sudo apt install -y hydra"], timeout=600)
+        sudo_install = build_wsl_sudo_command("apt update && apt install -y hydra", password=wsl_pass)
+        res = _run_cmd(build_wsl_command(sudo_install, distro=target, username=wsl_user), timeout=600)
         ok = res.returncode == 0
         if log_func:
             log_func("WSL Hydra install completed." if ok else f"WSL Hydra install failed: {(res.stderr or res.stdout).strip()[:220]}")
