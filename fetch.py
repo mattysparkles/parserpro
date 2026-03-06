@@ -2,6 +2,8 @@ import random
 import time
 import traceback
 
+from typing import Optional
+
 try:
     from playwright.sync_api import sync_playwright
 
@@ -21,6 +23,13 @@ try:
     HAS_SELENIUM = True
 except ImportError:
     HAS_SELENIUM = False
+
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+
+    HAS_WEBDRIVER_MANAGER = True
+except ImportError:
+    HAS_WEBDRIVER_MANAGER = False
 
 try:
     import deathbycaptcha
@@ -182,7 +191,22 @@ def fetch_page_playwright(url, proxy=None):
     return None, build_error_payload("fetch_failed", "Navigation failed", "unknown playwright failure")
 
 
+
+
+# NEW: Selenium + Chromedriver auto-setup check
+def ensure_chromedriver_available() -> tuple[bool, str, Optional[str]]:
+    """Try webdriver_manager install and return availability/message/driver_path."""
+    if not HAS_SELENIUM:
+        return False, "selenium_not_installed", None
+    if not HAS_WEBDRIVER_MANAGER:
+        return False, "webdriver_manager_not_installed", None
+    try:
+        driver_path = ChromeDriverManager().install()
+        return True, "chromedriver_ready", driver_path
+    except Exception as exc:
+        return False, f"chromedriver_auto_setup_failed: {exc}", None
 def fetch_page_selenium(url, proxy=None):
+    """Fetch page HTML using Selenium with webdriver_manager fallback."""
     if not HAS_SELENIUM:
         return None, "selenium_not_installed"
 
@@ -211,6 +235,14 @@ def fetch_page_selenium(url, proxy=None):
             options.add_argument("--ignore-certificate-errors")
 
         driver_path = (config.get("chrome_driver_path") or "").strip()
+        if not driver_path and bool(config.get("auto_setup_chromedriver", True)) and HAS_WEBDRIVER_MANAGER:
+            ok, msg, managed_path = ensure_chromedriver_available()
+            if ok and managed_path:
+                logger.info(f"Selenium auto-setup success: {msg}")
+                driver_path = managed_path
+            else:
+                logger.warn(f"Selenium auto-setup fallback: {msg}")
+
         if driver_path:
             service = ChromeService(executable_path=driver_path)
             driver = webdriver.Chrome(service=service, options=options)

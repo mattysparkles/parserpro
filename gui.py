@@ -17,8 +17,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, get_vpn_control, save_config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_vpn_control, save_config
 from extract import extract_login_form
+from fetch import ensure_chromedriver_available
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
 from proxies import ProxyManager
@@ -142,13 +143,69 @@ class CombinedParserGUI(RunnerMixin):
         self.runner_active_process = None
         self.runner_thread = None
         self.runner_running = False
+        self.running_subprocesses = set()
 
         self._build_ui()
         self._build_menu()
         self.root.after(100, self._drain_ui_queue)
         self.root.after(500, self.refresh_runner_list)  # slight delay to ensure widgets are ready
+        self.root.after(700, self.run_startup_checks)
         self._schedule_autosave_tick()
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
+
+
+    # NEW: startup dependency checks for Hydra/Chromedriver/NordVPN/proxy
+    def run_startup_checks(self):
+        """Run lightweight startup checks and warn in GUI/log when dependencies are missing."""
+        if not bool(config.get("startup_dependency_checks", True)):
+            return
+        issues = []
+        hydra_status = ensure_hydra_available(log_func=self._write_log_threadsafe)
+        if not hydra_status.get("available"):
+            issues.append("Hydra unavailable (runner will not work)")
+        else:
+            self._write_log_threadsafe(f"Hydra check: {hydra_status.get('message')}")
+
+        ok_driver, driver_msg, _ = ensure_chromedriver_available()
+        if not ok_driver:
+            issues.append(f"Chromedriver auto-setup issue: {driver_msg}")
+        else:
+            self._write_log_threadsafe("Chromedriver check: ready")
+
+        if get_vpn_control(config) == "nordvpn":
+            nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
+            if not nord.get("available"):
+                issues.append("NordVPN CLI missing (install required for vpn_control=nordvpn)")
+
+        if config.get("proxy_url", "").strip() and not get_effective_proxy(config, None):
+            issues.append("Configured proxy is unreachable; extraction will continue without it")
+
+        if issues:
+            self.record_event("WARN", "ui", "startup_check", "Startup dependency warnings", {"count": len(issues)})
+            messagebox.showerror("Startup checks", "\n".join(issues))
+
+    def register_running_process(self, process):
+        if process:
+            self.running_subprocesses.add(process)
+
+    def unregister_running_process(self, process):
+        if process and process in self.running_subprocesses:
+            self.running_subprocesses.remove(process)
+
+    def terminate_all_running_processes(self, reason):
+        for proc in list(self.running_subprocesses):
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    time.sleep(0.5)
+                    if proc.poll() is None:
+                        proc.kill()
+            except Exception:
+                pass
+            finally:
+                self.unregister_running_process(proc)
+        self.terminate_all_running_processes("pipeline cancel")
+        self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
 
     def load_processed_data(self):
         legacy_file = Path(__file__).resolve().parent / "processed_sites.json"
@@ -356,6 +413,8 @@ class CombinedParserGUI(RunnerMixin):
                 self.finish_runner_execution(payload)
             elif event == "runner_refresh":
                 self.apply_runner_filters_and_sort()
+            elif event == "critical_error":
+                messagebox.showerror("Error", payload)
             elif event == "timeline_event":
                 self.record_event(
                     payload.get("level"),
@@ -672,11 +731,8 @@ class CombinedParserGUI(RunnerMixin):
             self.settings_window.destroy()
 
     def _resolve_nordvpn_cli(self):
-        for candidate in ("nordvpn", "nordvpncli"):
-            cli_path = shutil.which(candidate)
-            if cli_path:
-                return cli_path
-        return None
+        status = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
+        return status.get("path") if status.get("available") else None
 
     def _windows_nordvpn_supported(self, cli_path):
         if platform.system().lower() != "windows":
@@ -697,9 +753,9 @@ class CombinedParserGUI(RunnerMixin):
         try:
             cli_path = self._resolve_nordvpn_cli()
             if not cli_path or not self._windows_nordvpn_supported(cli_path):
-                msg = "NordVPN automation not supported on Windows; set vpn_control='none' and manage VPN externally."
+                msg = "NordVPN CLI not available; install NordVPN Windows app/CLI and retry."
                 self._write_log_threadsafe(msg)
-                log_once("nordvpn-windows-unsupported", msg)
+                self.ui_queue.put(("critical_error", msg))
                 return None
 
             if not config.get('nord_token'):
@@ -707,8 +763,12 @@ class CombinedParserGUI(RunnerMixin):
                 return None
 
             self._write_log_threadsafe("Setting up NordVPN + SOCKS5 proxy...")
-            subprocess.run([cli_path, "login", "--token", config['nord_token']], capture_output=True)
-            subprocess.run([cli_path, "connect"], capture_output=True)
+            login_proc = subprocess.run([cli_path, "login", "--token", config['nord_token']], capture_output=True, text=True, timeout=30)
+            if login_proc.returncode != 0:
+                raise RuntimeError((login_proc.stderr or login_proc.stdout or "NordVPN login failed").strip())
+            connect_proc = subprocess.run([cli_path, "connect"], capture_output=True, text=True, timeout=30)
+            if connect_proc.returncode != 0:
+                raise RuntimeError((connect_proc.stderr or connect_proc.stdout or "NordVPN connect failed").strip())
 
             gost_path = download_gost()
             if not gost_path:
@@ -1198,6 +1258,20 @@ class CombinedParserGUI(RunnerMixin):
     def on_exit(self):
         self.request_autosave()
         self.autosave_worker.stop()
+        self.terminate_all_running_processes("application exit")
+        if self.gost_process:
+            try:
+                self.gost_process.terminate()
+            except Exception:
+                pass
+            self.gost_process = None
+        if get_vpn_control(config) == "nordvpn":
+            cli_path = self._resolve_nordvpn_cli()
+            if cli_path:
+                try:
+                    subprocess.run([cli_path, "disconnect"], capture_output=True, timeout=10)
+                except Exception:
+                    pass
         self.root.destroy()
 
     def build_troubleshooting_tab(self, tab):
@@ -1363,7 +1437,7 @@ class CombinedParserGUI(RunnerMixin):
         self.record_event("WARN", "run", "cancel", "Run cancellation requested")
         self.cancel_button.config(state="disabled")
         log_once("cancel-requested", "Cancellation requested; stopping outstanding work.")
-        self.terminate_active_runner_process()
+        self.terminate_all_running_processes("pipeline cancel")
 
         if self.pipeline_running:
             self.root.after(200, self.check_thread_done)
@@ -1422,6 +1496,7 @@ class CombinedParserGUI(RunnerMixin):
         self.extract_log_file = None
         messagebox.showinfo("Pipeline Status", final_msg)
 
+        self.terminate_all_running_processes("pipeline cleanup")
         if self.gost_process:
             self.gost_process.terminate()
             self.gost_process = None
@@ -1742,6 +1817,8 @@ class CombinedParserGUI(RunnerMixin):
                                 })
                                 reason = form.get('validation_reason') or form.get('reasons') or 'ok'
                                 self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
+                                if form.get('method') == 'get':
+                                    self._write_log_threadsafe(f"{base} :: WARN GET login form detected; hydra tuning may be required")
                             elif status == "skipped_invalid_target":
                                 reason = outcome.get('reason', 'invalid target')
                                 entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "invalid_target", "last_error_hint": reason, "last_error_detail": reason})
@@ -1789,7 +1866,7 @@ class CombinedParserGUI(RunnerMixin):
 
                 if results:
                     keys = ['original_url', 'base_url', 'used_url', 'used_type', 'action', 'post_data',
-                            'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason']
+                            'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason', 'method', 'method_warning']
                     with forms_path.open("w", newline="", encoding="utf-8") as f:
                         writer = csv.DictWriter(f, fieldnames=keys)
                         writer.writeheader()

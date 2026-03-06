@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, config, ensure_hydra_available
 from helpers import get_site_filename, log_once
 
 
@@ -289,6 +289,34 @@ class RunnerMixin:
         self.select_all_filtered()
         self.start_runner_execution([row["site"] for row in self.runner_rows_view if row.get("selected")])
 
+
+    # NEW: Hydra backend detection (WSL preferred on Windows)
+    def _hydra_backend_for_runtime(self):
+        """Return 'wsl' or 'native' based on auto-detection and config preference."""
+        prefer_wsl = bool(config.get("prefer_wsl_hydra", True))
+        status = ensure_hydra_available(log_func=self._write_log_threadsafe)
+        if not status.get("available"):
+            self.ui_queue.put(("critical_error", f"Hydra is not available: {status.get('message')}."))
+            return None
+        if prefer_wsl and status.get("mode") == "wsl":
+            return "wsl"
+        return status.get("mode") or "native"
+
+    def _terminate_process_tree(self, process, reason):
+        """Terminate process gracefully, escalating to kill if needed."""
+        if not process or process.poll() is not None:
+            return
+        self._append_hydra_log_threadsafe(f"[INFO] Stopping Hydra process ({reason})\n")
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                time.sleep(1)
+                process.kill()
+            except Exception:
+                pass
+
     def start_runner_execution(self, sites):
         if self.runner_running:
             messagebox.showinfo("Runner Busy", "Runner is already active.")
@@ -317,6 +345,11 @@ class RunnerMixin:
 
         session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         runner_log_file = LOGS_DIR / f"runner_{session_ts}.log"
+        hydra_backend = self._hydra_backend_for_runtime()
+        if not hydra_backend:
+            self.ui_queue.put(("runner_done", "Runner stopped: Hydra unavailable."))
+            return
+        timeout_seconds = int(config.get("hydra_timeout_seconds", 3600))
         for site in sites:
             if self.cancel_event.is_set():
                 self._append_hydra_log_threadsafe("Runner cancelled by user.\n")
@@ -353,22 +386,27 @@ class RunnerMixin:
             self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
 
             try:
-                if os.name == "nt" and os.system("wsl --version >nul 2>&1") == 0:
-                    process = subprocess.Popen(["wsl", "bash", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                if hydra_backend == "wsl":
+                    process = subprocess.Popen(["wsl", "bash", "-lc", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                 else:
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
                 self.runner_active_process = process
+                self.register_running_process(process)
                 for line in iter(process.stdout.readline, ""):
                     self._append_hydra_log_threadsafe(line)
                     with runner_log_file.open("a", encoding="utf-8") as lf:
                         lf.write(line)
                     if self.cancel_event.is_set():
-                        self.terminate_active_runner_process()
+                        self._terminate_process_tree(process, "user_cancel")
                         break
                     self._capture_hit(site, line)
 
-                process.wait(timeout=3)
+                try:
+                    process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    self._append_hydra_log_threadsafe(f"[WARN] Timeout reached ({timeout_seconds}s) for {site}; terminating process.\n")
+                    self._terminate_process_tree(process, "timeout")
                 if process.returncode == 0 and not self.cancel_event.is_set():
                     self._append_hydra_log_threadsafe(f"[SUCCESS] Command finished for {site}\n")
                     self._set_row_status(site, "Success")
@@ -381,6 +419,7 @@ class RunnerMixin:
                 self._append_hydra_log_threadsafe(f"Error running command for {site}: {e}\n")
                 self._set_row_status(site, "Failed")
             finally:
+                self.unregister_running_process(process if "process" in locals() else None)
                 self.runner_active_process = None
 
             self._append_hydra_log_threadsafe(f"=== Finished {site} ===\n\n")
@@ -418,14 +457,7 @@ class RunnerMixin:
         proc = self.runner_active_process
         if not proc or proc.poll() is not None:
             return
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        self._terminate_process_tree(proc, "cancel request")
         log_once("runner-process-stop", "Active runner subprocess terminated after cancel request.")
 
     def finish_runner_execution(self, final_msg):

@@ -38,6 +38,7 @@ def detect_failure_string(soup, url):
 
 
 def validate_login_form(form, html_content, strict=True):
+    """Validate a login form candidate and include detected HTTP method."""
     confidence = 0
     reasons = []
 
@@ -53,7 +54,7 @@ def validate_login_form(form, html_content, strict=True):
 
     password_fields = form.find_all("input", {"type": "password"})
     if not password_fields:
-        return False, "no password field found", 0
+        return False, "no password field found", 0, method
 
     confidence += 40
 
@@ -83,9 +84,9 @@ def validate_login_form(form, html_content, strict=True):
     confidence = min(100, max(0, confidence))
 
     if confidence < 60 and strict:
-        return False, f"low confidence ({confidence}): {', '.join(reasons)}", confidence
+        return False, f"low confidence ({confidence}): {', ' .join(reasons)}", confidence, method
 
-    return True, f"valid (confidence: {confidence}; reasons: {', '.join(reasons) or 'n/a'})", confidence
+    return True, f"valid (confidence: {confidence}; reasons: {', ' .join(reasons) or 'n/a'})", confidence, method
 
 
 def normalize_form_action(page_url, action):
@@ -181,7 +182,7 @@ def extract_loginish_metadata(soup, page_url):
         if not _is_login_like_form(form):
             continue
 
-        valid, reason, confidence = validate_login_form(form, str(soup), strict=False)
+        valid, reason, confidence, method = validate_login_form(form, str(soup), strict=False)
         action_url = normalize_form_action(page_url, form.get("action")) or page_url
         method = (form.get("method") or "get").lower()
         submit_mode = infer_submit_mode(form, page_url, action_url)
@@ -340,7 +341,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     best_confidence = best_candidate["confidence"]
     best_reason = best_candidate["reason"]
     action = best_candidate["action_url"]
-    method = best_candidate["method"]
+    method = (best_candidate.get("method") or "post").lower()
 
     post_parts = []
     username_field = None
@@ -371,12 +372,13 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     failure = detect_failure_string(soup, url)
     post_data = "&".join(post_parts)
 
-    status = "success_form" if submit_mode == "native_post" and username_field and password_field else "success_loginish"
+    status = "success_form" if submit_mode in {"native_post", "native_get"} and username_field and password_field else "success_loginish"
 
     hydra_template = ""
     if status == "success_form":
         target = urlparse(url).netloc or url
-        hydra_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} http-post-form "{action}:{post_data}:{failure}" -V -t 4 -f'
+        hydra_module = "http-get-form" if method == "get" else "http-post-form"
+        hydra_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
 
     result = {
         "status": status,
@@ -394,7 +396,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         "pass_field": password_field,
         "submit_mode": submit_mode,
         "reasons": best_reason,
-        "classification": "✅ actionable native POST form" if status == "success_form" else "🟨 login-ish (JS-handled / non-POST / missing action)",
+        "classification": "✅ actionable native form" if status == "success_form" else "🟨 login-ish (JS-handled / non-POST / missing action)",
+        "method_warning": "Detected GET form; payload may need manual tuning" if method == "get" else "",
         "login_metadata": {
             "page_url": url,
             "fields": best_candidate["fields"],

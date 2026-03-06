@@ -14,8 +14,9 @@ try:
 except ImportError:
     InsecureRequestWarning = Warning
 
-from config import DATA_DIR, LOGS_DIR, config
+from config import DATA_DIR, LOGS_DIR, config, ensure_hydra_available, ensure_nordvpn_cli
 from extract import extract_login_form
+from fetch import ensure_chromedriver_available
 from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
 from gui import CombinedParserGUI
 
@@ -47,8 +48,27 @@ def _build_headless_logger() -> logging.Logger:
     return logger
 
 
+
+
+# NEW: startup checks for headless and GUI entry
+def run_startup_dependency_checks(logger: logging.Logger | None = None) -> list[str]:
+    """Run startup checks and return warning messages for missing dependencies."""
+    notes: list[str] = []
+    hydra = ensure_hydra_available(log_func=(logger.info if logger else None))
+    if not hydra.get("available"):
+        notes.append(f"Hydra unavailable: {hydra.get('message')}")
+    chromedriver_ok, chromedriver_msg, _ = ensure_chromedriver_available()
+    if not chromedriver_ok:
+        notes.append(f"Chromedriver setup warning: {chromedriver_msg}")
+    if str(config.get("vpn_control", "none")).lower() == "nordvpn":
+        nord = ensure_nordvpn_cli(log_func=(logger.info if logger else None))
+        if not nord.get("available"):
+            notes.append("NordVPN CLI missing (required for vpn_control=nordvpn)")
+    return notes
 def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) -> int:
     logger = _build_headless_logger()
+    for warning in run_startup_dependency_checks(logger):
+        logger.warning(warning)
     rows = []
     site_combos = {}
     for raw in input_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -83,6 +103,8 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
                     "full_hydra_command": form_data.get("hydra_command_template", "").replace("{{combo_file}}", get_site_filename(base)),
                     "confidence": form_data.get("confidence"),
                     "validation_reason": form_data.get("validation_reason"),
+                    "method": form_data.get("method", "post"),
+                    "method_warning": form_data.get("method_warning", ""),
                 }
             )
             logger.info("success: %s", base)
@@ -106,6 +128,8 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
                 "full_hydra_command",
                 "confidence",
                 "validation_reason",
+                "method",
+                "method_warning",
             ],
         )
         writer.writeheader()
@@ -136,6 +160,8 @@ def main() -> None:
             raise SystemExit("--headless requires --extract and --forms-output")
         raise SystemExit(run_headless_extract(Path(args.extract), Path(args.forms_output), args.run_hydra))
 
+    for warning in run_startup_dependency_checks():
+        print(f"[startup-warning] {warning}")
     root = tk.Tk()
     CombinedParserGUI(root)
     root.mainloop()
