@@ -378,7 +378,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     if status == "success_form":
         target = urlparse(url).netloc or url
         hydra_module = "http-get-form" if method == "get" else "http-post-form"
-        hydra_template = f'hydra -L "{{combo_file}}" -P "{{combo_file}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
+        # FIX: Use Hydra combo mode (-C) because generated combo files are user:pass lines.
+        hydra_template = f'hydra -C "{{combo_file}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
 
     result = {
         "status": status,
