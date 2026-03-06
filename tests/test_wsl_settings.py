@@ -1,4 +1,4 @@
-from config import _is_apt_lock_error, build_wsl_command, build_wsl_sudo_command
+from config import _is_apt_lock_error, _is_sudo_auth_error, build_wsl_command, build_wsl_sudo_command
 
 
 def test_build_wsl_command_with_distro_and_user():
@@ -24,3 +24,10 @@ def test_is_apt_lock_error_detection():
     assert _is_apt_lock_error("Could not get lock /var/lib/apt/lists/lock")
     assert _is_apt_lock_error("Unable to lock directory")
     assert not _is_apt_lock_error("sudo: a password is required")
+
+
+def test_is_sudo_auth_error_detection():
+    assert _is_sudo_auth_error("sudo: a password is required")
+    assert _is_sudo_auth_error("[sudo] password for sparkles:")
+    assert _is_sudo_auth_error("E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)\nE: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?")
+    assert not _is_sudo_auth_error("Could not get lock /var/lib/apt/lists/lock")
