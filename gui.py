@@ -204,7 +204,6 @@ class CombinedParserGUI(RunnerMixin):
                 pass
             finally:
                 self.unregister_running_process(proc)
-        self.terminate_all_running_processes("pipeline cancel")
         self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
 
     def load_processed_data(self):

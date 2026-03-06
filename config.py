@@ -249,17 +249,23 @@ def _download_hydra_windows_binary(log_func=None):
     return None
 
 
-def _add_dir_to_path_windows(path_obj: Path) -> bool:
+def _add_dir_to_path_windows(path_obj: Path) -> dict:
+    """Add a directory to PATH for current process and try persisting via setx."""
     target = str(path_obj)
     path_now = os.environ.get("PATH", "")
     if target.lower() in path_now.lower():
-        return False
+        return {"session_updated": False, "persisted": False}
+
+    merged = f"{path_now};{target}" if path_now else target
+    os.environ["PATH"] = merged
+
+    persisted = False
     try:
-        merged = f"{path_now};{target}"
-        subprocess.run(["setx", "PATH", merged], capture_output=True, text=True, timeout=30)
-        return True
+        res = subprocess.run(["setx", "PATH", merged], capture_output=True, text=True, timeout=30)
+        persisted = res.returncode == 0
     except Exception:
-        return False
+        persisted = False
+    return {"session_updated": True, "persisted": persisted}
 
 
 def ensure_hydra_available(log_func=None):
@@ -278,15 +284,18 @@ def ensure_hydra_available(log_func=None):
     if auto_install and os.name == "nt":
         hydra_exe = _download_hydra_windows_binary(log_func=log_func)
         if hydra_exe:
-            restart_needed = _add_dir_to_path_windows(hydra_exe.parent)
+            path_result = _add_dir_to_path_windows(hydra_exe.parent)
             message = "Hydra installed natively on Windows"
-            if restart_needed:
-                message += "; restart may be required for PATH update"
+            if path_result.get("session_updated") and not path_result.get("persisted"):
+                message += "; session PATH updated (run setx PATH to persist and restart shells)"
+            elif path_result.get("persisted"):
+                message += "; PATH persisted via setx (restart shells may be required)"
             return {
                 "available": True,
                 "mode": "native",
                 "message": message,
-                "path_updated": restart_needed,
+                "path_updated": bool(path_result.get("session_updated")),
+                "path_persisted": bool(path_result.get("persisted")),
             }
 
     return {"available": False, "mode": None, "message": "Hydra not found (native or WSL)"}
@@ -307,7 +316,9 @@ def ensure_nordvpn_cli(log_func=None):
         if not path_obj.exists() and os.path.sep in str(candidate):
             continue
         if os.name == "nt" and bool(config.get("auto_configure_nordvpn_path", True)):
-            _add_dir_to_path_windows(path_obj.parent)
+            path_result = _add_dir_to_path_windows(path_obj.parent)
+            if log_func and path_result.get("session_updated") and not path_result.get("persisted"):
+                log_func("NordVPN path added for current session; run setx PATH for a permanent update.")
         return {"available": True, "path": str(path_obj)}
 
     if log_func:
