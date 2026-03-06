@@ -213,7 +213,22 @@ def build_wsl_sudo_command(base_command: str, password: str = "", non_interactiv
 
 def _is_apt_lock_error(output: str) -> bool:
     message = (output or "").lower()
-    return "could not get lock" in message or "unable to lock" in message
+    return (
+        "could not get lock" in message
+        or "unable to lock" in message
+        or "could not open lock file" in message
+        or "lock-frontend" in message
+    )
+
+
+def _is_sudo_auth_error(output: str) -> bool:
+    message = (output or "").lower()
+    return (
+        "sudo: a password is required" in message
+        or "[sudo] password for" in message
+        or "are you root?" in message
+        or "permission denied" in message
+    )
 
 
 def _wsl_available() -> bool:
@@ -346,8 +361,14 @@ def _install_hydra_wsl(log_func=None) -> bool:
 
         ok = bool(res) and res.returncode == 0
         if log_func:
+            output = f"{res.stderr or ''}\n{res.stdout or ''}" if res else ""
             if ok:
                 log_func("WSL Hydra install completed.")
+            elif _is_sudo_auth_error(output):
+                log_func(
+                    "WSL Hydra install failed: sudo authentication/permissions required in WSL "
+                    "(set wsl_password in settings or install hydra manually with sudo)."
+                )
             elif not wsl_pass:
                 log_func("WSL Hydra install failed: sudo password required for auto-install (set wsl_password in settings).")
             else:
