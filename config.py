@@ -179,7 +179,14 @@ def save_config():
 
 
 def _run_cmd(command, timeout=30):
-    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def _wsl_available() -> bool:
@@ -350,7 +357,14 @@ def _add_dir_to_path_windows(path_obj: Path) -> dict:
 
     persisted = False
     try:
-        res = subprocess.run(["setx", "PATH", merged], capture_output=True, text=True, timeout=30)
+        res = subprocess.run(
+            ["setx", "PATH", merged],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
         persisted = res.returncode == 0
     except Exception:
         persisted = False

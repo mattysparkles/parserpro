@@ -951,7 +951,7 @@ class CombinedParserGUI(RunnerMixin):
         if "nordvpngui" in Path(cli_path).name.lower():
             return False
         try:
-            result = subprocess.run([cli_path, "--help"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([cli_path, "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
             help_text = (result.stdout or "") + "\n" + (result.stderr or "")
             help_text = help_text.lower()
         except Exception:
@@ -974,10 +974,10 @@ class CombinedParserGUI(RunnerMixin):
                 return None
 
             self._write_log_threadsafe("Setting up NordVPN + SOCKS5 proxy...")
-            login_proc = subprocess.run([cli_path, "login", "--token", config['nord_token']], capture_output=True, text=True, timeout=30)
+            login_proc = subprocess.run([cli_path, "login", "--token", config['nord_token']], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             if login_proc.returncode != 0:
                 raise RuntimeError((login_proc.stderr or login_proc.stdout or "NordVPN login failed").strip())
-            connect_proc = subprocess.run([cli_path, "connect"], capture_output=True, text=True, timeout=30)
+            connect_proc = subprocess.run([cli_path, "connect"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             if connect_proc.returncode != 0:
                 raise RuntimeError((connect_proc.stderr or connect_proc.stdout or "NordVPN connect failed").strip())
 
