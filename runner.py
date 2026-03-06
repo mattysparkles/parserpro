@@ -388,31 +388,26 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
-            combo_path = self.processed_data.get(site, {}).get("combo_path")
-            combo_file_name = get_site_filename(site)
-            # FIX: Prefer the per-site generated filename from helpers.get_site_filename(base).
-            combo_file = DATA_DIR / combo_file_name
-            if combo_path:
-                combo_candidate = Path(combo_path)
-                if combo_candidate.exists():
-                    combo_file = combo_candidate
-            if not combo_file.exists():
-                self._append_hydra_log_threadsafe(f"Combo file missing for {site}: {combo_file}\n")
+            # FIXED: Resolve combo filename using helpers.get_site_filename(site) as required.
+            combo_file = get_site_filename(site)
+            combo_file_path = Path(combo_file)
+            if not combo_file_path.exists():
+                self._append_hydra_log_threadsafe(f"[ERROR] Combo file missing for {site}: {combo_file_path}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            # FIX: Ensure the {{combo_file}} placeholder exists and is replaced with helpers.get_site_filename(site).
-            if "{{combo_file}}" not in cmd_template:
-                self._append_hydra_log_threadsafe(
-                    f"Combo placeholder replacement failed for {site}: missing {{combo_file}} in template; skipping.\n"
-                )
-                self._set_row_status(site, "Failed")
-                continue
+            # FIXED: Force Hydra combined-credential mode and replace all supported combo placeholders.
+            cmd = str(cmd_template)
+            cmd = cmd.replace("{{combo_file}}", combo_file)
+            cmd = cmd.replace('"{combo_file}"', combo_file)
+            cmd = cmd.replace("'{combo_file}'", combo_file)
+            cmd = cmd.replace("{combo_file}", combo_file)
+            cmd = cmd.replace(" -L ", " -C ").replace(" -P ", " ")
 
-            cmd = cmd_template.replace("{{combo_file}}", str(combo_file.resolve()))
-            if "{{combo_file}}" in cmd:
+            # FIXED: Defensive guard for unresolved placeholder variants.
+            if "{{combo_file}}" in cmd or "{combo_file}" in cmd:
                 self._append_hydra_log_threadsafe(
-                    f"Combo placeholder replacement failed for {site}: unresolved {{combo_file}} token; skipping.\n"
+                    f"[WARN] Combo placeholder unresolved for {site}; skipping command: {cmd}\n"
                 )
                 self._set_row_status(site, "Failed")
                 continue
@@ -433,7 +428,8 @@ class RunnerMixin:
 
             self._append_hydra_log_threadsafe(f"\n=== Starting command for {site} ===\n")
             self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
-            # FIX: Emit final Hydra command to stdout for startup/runner replacement debugging.
+            # FIXED: Log the final command after all replacements for debugging/auditing.
+            self._append_hydra_log_threadsafe(f"[DEBUG FINAL CMD] {cmd}\n")
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
 
             try:
