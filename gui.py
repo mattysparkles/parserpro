@@ -144,6 +144,9 @@ class CombinedParserGUI(RunnerMixin):
         self.runner_thread = None
         self.runner_running = False
         self.running_subprocesses = set()
+        # FIX: Guard cleanup/logging paths to prevent recursive shutdown loops.
+        self._cleaning_up = False
+        self._cleanup_log_emitted = False
 
         self._build_ui()
         self._build_menu()
@@ -193,6 +196,9 @@ class CombinedParserGUI(RunnerMixin):
             self.running_subprocesses.remove(process)
 
     def terminate_all_running_processes(self, reason):
+        # FIX: Re-entrancy guard to stop recursive terminate/log loops on close.
+        if self._cleaning_up and self._cleanup_log_emitted:
+            return
         for proc in list(self.running_subprocesses):
             try:
                 if proc.poll() is None:
@@ -204,7 +210,20 @@ class CombinedParserGUI(RunnerMixin):
                 pass
             finally:
                 self.unregister_running_process(proc)
-        self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
+        if self.gost_process:
+            try:
+                if self.gost_process.poll() is None:
+                    self.gost_process.terminate()
+                    time.sleep(0.2)
+                    if self.gost_process.poll() is None:
+                        self.gost_process.kill()
+            except Exception:
+                pass
+            finally:
+                self.gost_process = None
+        if not self._cleanup_log_emitted:
+            self._cleanup_log_emitted = True
+            self._write_log_threadsafe(f"Terminated subprocesses: {reason}")
 
     def load_processed_data(self):
         legacy_file = Path(__file__).resolve().parent / "processed_sites.json"
@@ -356,6 +375,9 @@ class CombinedParserGUI(RunnerMixin):
         return None
 
     def _write_log_threadsafe(self, text):
+        # FIX: Avoid recursive UI/log churn while shutdown cleanup is active.
+        if getattr(self, "_cleaning_up", False) and text.startswith("Terminated subprocesses:") and self._cleanup_log_emitted:
+            return
         if self.extract_log_file:
             with self.extract_log_file.open("a", encoding="utf-8") as fh:
                 fh.write(text + "\n")
@@ -1255,15 +1277,14 @@ class CombinedParserGUI(RunnerMixin):
         self.status_text.set(f"Exported timeline CSV: {Path(fp).name}")
 
     def on_exit(self):
+        # FIX: Prevent recursive close handling when WM_DELETE_WINDOW fires repeatedly.
+        if self._cleaning_up:
+            return
+        self._cleaning_up = True
+        self._cleanup_log_emitted = False
         self.request_autosave()
         self.autosave_worker.stop()
         self.terminate_all_running_processes("application exit")
-        if self.gost_process:
-            try:
-                self.gost_process.terminate()
-            except Exception:
-                pass
-            self.gost_process = None
         if get_vpn_control(config) == "nordvpn":
             cli_path = self._resolve_nordvpn_cli()
             if cli_path:
@@ -1495,10 +1516,8 @@ class CombinedParserGUI(RunnerMixin):
         self.extract_log_file = None
         messagebox.showinfo("Pipeline Status", final_msg)
 
+        self._cleanup_log_emitted = False
         self.terminate_all_running_processes("pipeline cleanup")
-        if self.gost_process:
-            self.gost_process.terminate()
-            self.gost_process = None
         if get_vpn_control(config) == "nordvpn":
             cli_path = self._resolve_nordvpn_cli()
             if cli_path and self._windows_nordvpn_supported(cli_path):
