@@ -28,6 +28,7 @@ from helpers import get_base_url, get_site_filename, normalize_site, split_three
 from gui import CombinedParserGUI
 
 warnings.simplefilter("ignore", InsecureRequestWarning)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 if sys.platform == "win32":
     try:
@@ -67,18 +68,18 @@ def _log_note(notes: list[str], text: str, logger: logging.Logger | None = None)
 
 
 def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dialogs: bool = True) -> list[str]:
-    # FIX: Call centralized Hydra setup before UI loop/headless extraction.
+    # FIXED: Hydra detection / PATH add / WSL Kali support
     notes: list[str] = []
     hydra_status = check_and_setup_hydra(log_func=(logger.info if logger else None))
     _log_note(notes, f"Hydra check: {hydra_status.get('message')}", logger)
 
     if not hydra_status.get("available"):
-        warn = "Hydra is still unavailable. GUI will load, but Hydra Runner is disabled."
+        warn = "Runner disabled. See log for details."
         notes.append(warn)
         config["runner_enabled"] = False
         config["hydra_unavailable_message"] = warn
         if show_dialogs and not logger:
-            messagebox.showwarning("Hydra unavailable", warn)
+            messagebox.showwarning("Hydra not available", warn)
 
     try:
         import webdriver_manager.chrome  # noqa: F401
@@ -226,7 +227,9 @@ def _schedule_gui_startup_checks(root: tk.Tk) -> None:
             return
 
         startup_warnings = [n for n in notes if _is_startup_warning(n)]
-        if startup_warnings:
+        if any("runner disabled" in n.lower() for n in startup_warnings):
+            messagebox.showwarning("Hydra not available", "Runner disabled. See log for details.")
+        elif startup_warnings:
             messagebox.showwarning("ParserPro startup prerequisites", "\n".join(startup_warnings))
 
     threading.Thread(target=_worker, name="startup-checks", daemon=True).start()

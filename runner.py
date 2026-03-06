@@ -425,7 +425,11 @@ class RunnerMixin:
                     cmd = f"{cmd} -p {rotate_proxy['server']}"
 
             self._append_hydra_log_threadsafe(f"\n=== Starting command for {site} ===\n")
-            self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
+            if str(config.get("wsl_hydra_distro", "")).strip():
+                # FIXED: Hydra detection / PATH add / WSL Kali support
+                self._append_hydra_log_threadsafe(f"[Using WSL {config.get('wsl_hydra_distro')}] {cmd}\n")
+            else:
+                self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
             # FIXED: Log the final command after all replacements for debugging/auditing.
             self._append_hydra_log_threadsafe(f"[DEBUG FINAL CMD] {cmd}\n")
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
@@ -433,7 +437,9 @@ class RunnerMixin:
             try:
                 if backend_mode == "wsl":
                     wsl_user = str(config.get("wsl_username", "")).strip()
-                    wsl_cmd = build_wsl_command(cmd, distro=backend_distro, username=wsl_user)
+                    distro = str(config.get("wsl_hydra_distro", "")).strip() or backend_distro
+                    wsl_cmd = build_wsl_command(cmd, distro=distro, username=wsl_user)
+                    self._append_hydra_log_threadsafe(f"[Using WSL {distro}] wsl -d {distro} {cmd}\n")
                     process = subprocess.Popen(
                         wsl_cmd,
                         stdout=subprocess.PIPE,
