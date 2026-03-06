@@ -401,16 +401,21 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
-            # FIX: Replace placeholder with the actual per-site combo file path.
+            # FIX: Ensure the {{combo_file}} placeholder exists and is replaced with helpers.get_site_filename(site).
+            if "{{combo_file}}" not in cmd_template:
+                self._append_hydra_log_threadsafe(
+                    f"Combo placeholder replacement failed for {site}: missing {{combo_file}} in template; skipping.\n"
+                )
+                self._set_row_status(site, "Failed")
+                continue
+
             cmd = cmd_template.replace("{{combo_file}}", str(combo_file.resolve()))
-            # FIX: Upgrade legacy templates from -L/-P (same combo file) to Hydra combo mode (-C).
-            combo_escaped = re.escape(str(combo_file.resolve()))
-            cmd = re.sub(
-                rf'-L\s+"?{combo_escaped}"?\s+-P\s+"?{combo_escaped}"?',
-                lambda _m: f'-C "{combo_file.resolve()}"',
-                cmd,
-                count=1,
-            )
+            if "{{combo_file}}" in cmd:
+                self._append_hydra_log_threadsafe(
+                    f"Combo placeholder replacement failed for {site}: unresolved {{combo_file}} token; skipping.\n"
+                )
+                self._set_row_status(site, "Failed")
+                continue
             intercept_proxy = ""
             if bool(config.get("use_burp", False)):
                 intercept_proxy = config.get("burp_proxy", "").strip()
