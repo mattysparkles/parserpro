@@ -261,8 +261,13 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
     if run_hydra:
         for form in forms:
             cmd = form["hydra_command_template"].replace("{{combo_file}}", str((DATA_DIR / form["combo_file"]).resolve()))
-            if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip() and " -p " not in f" {cmd} ":
-                cmd = f"{cmd} -p {config.get('burp_proxy').strip()}"
+            intercept_proxy = ""
+            if bool(config.get("use_burp", False)):
+                intercept_proxy = config.get("burp_proxy", "").strip()
+            elif bool(config.get("use_zap", False)):
+                intercept_proxy = config.get("zap_proxy", "").strip()
+            if intercept_proxy and " -p " not in f" {cmd} ":
+                cmd = f"{cmd} -p {intercept_proxy}"
             logger.info("running hydra: %s", cmd)
             subprocess.run(cmd, shell=True, check=False)
 
