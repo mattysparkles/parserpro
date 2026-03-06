@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, config, ensure_hydra_available
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, build_wsl_command, config, ensure_hydra_available
 from helpers import get_site_filename, log_once
 
 
@@ -311,7 +311,7 @@ class RunnerMixin:
     def _hydra_backend_for_runtime(self):
         """Return runtime hydra mode and optional WSL distro set during startup checks."""
         startup_mode = os.environ.get("PARSERPRO_HYDRA_MODE", "").strip().lower()
-        startup_distro = os.environ.get("PARSERPRO_WSL_DISTRO", "").strip()
+        startup_distro = os.environ.get("PARSERPRO_WSL_DISTRO", "").strip() or str(config.get("wsl_hydra_distro", "")).strip()
         if startup_mode in {"wsl", "native"}:
             return {"mode": startup_mode, "distro": startup_distro}
 
@@ -434,10 +434,8 @@ class RunnerMixin:
 
             try:
                 if backend_mode == "wsl":
-                    wsl_cmd = ["wsl"]
-                    if backend_distro:
-                        wsl_cmd.extend(["-d", backend_distro])
-                    wsl_cmd.extend(["bash", "-lc", cmd])
+                    wsl_user = str(config.get("wsl_username", "")).strip()
+                    wsl_cmd = build_wsl_command(cmd, distro=backend_distro, username=wsl_user)
                     process = subprocess.Popen(
                         wsl_cmd,
                         stdout=subprocess.PIPE,

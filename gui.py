@@ -782,6 +782,14 @@ class CombinedParserGUI(RunnerMixin):
         self.proxy_url_setting = tk.StringVar(value=config.get("proxy_url", ""))
         ttk.Entry(network_frame, textvariable=self.proxy_url_setting).pack(fill="x", padx=10, pady=(0, 8))
 
+        ttk.Label(network_frame, text="WSL Username (optional, for Hydra over WSL)").pack(anchor="w", padx=10, pady=(0, 2))
+        self.wsl_username = tk.StringVar(value=config.get("wsl_username", ""))
+        ttk.Entry(network_frame, textvariable=self.wsl_username).pack(fill="x", padx=10, pady=(0, 8))
+
+        ttk.Label(network_frame, text="WSL Password (optional, used for sudo install)").pack(anchor="w", padx=10, pady=(0, 2))
+        self.wsl_password = tk.StringVar(value=config.get("wsl_password", ""))
+        ttk.Entry(network_frame, textvariable=self.wsl_password, show="*").pack(fill="x", padx=10, pady=(0, 8))
+
         self.proxy_required = tk.BooleanVar(value=bool(config.get("proxy_required", False)))
         ttk.Checkbutton(network_frame, text="Require proxy (fail fast if unreachable)", variable=self.proxy_required).pack(anchor="w", padx=10, pady=3)
 
@@ -916,6 +924,8 @@ class CombinedParserGUI(RunnerMixin):
         config['capsolver_key'] = self.capsolver_key.get()
         config['vpn_control'] = self.vpn_control.get().strip().lower()
         config['proxy_url'] = self.proxy_url_setting.get().strip()
+        config['wsl_username'] = self.wsl_username.get().strip()
+        config['wsl_password'] = self.wsl_password.get()
         config['proxy_required'] = bool(self.proxy_required.get())
         config['allow_nonstandard_ports'] = bool(self.allow_nonstandard_ports.get())
         config['cache_ttl_days'] = max(1, int(self.cache_ttl_days.get() or 30))
