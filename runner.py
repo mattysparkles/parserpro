@@ -82,8 +82,10 @@ class RunnerMixin:
         btn_frame = ttk.Frame(log_section)
         btn_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(btn_frame, text="Refresh List", command=self.refresh_runner_list).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Run Selected", command=self.run_selected_hydra).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Run All (Filtered)", command=self.run_all_hydra).pack(side="left", padx=4)
+        self.run_selected_button = ttk.Button(btn_frame, text="Run Selected", command=self.run_selected_hydra)
+        self.run_selected_button.pack(side="left", padx=4)
+        self.run_all_button = ttk.Button(btn_frame, text="Run All (Filtered)", command=self.run_all_hydra)
+        self.run_all_button.pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Select All (Filtered)", command=self.select_all_filtered).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Deselect All (Filtered)", command=self.deselect_all_filtered).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Invert Selection (Filtered)", command=self.invert_selection_filtered).pack(side="left", padx=4)
@@ -98,6 +100,15 @@ class RunnerMixin:
         log_x.grid(row=2, column=0, sticky="ew")
         self.hydra_log.configure(yscrollcommand=log_y.set, xscrollcommand=log_x.set)
         self._bind_scroll_wheel(self.hydra_log)
+
+        if not config.get("runner_enabled", True):
+            self.run_selected_button.config(state="disabled")
+            self.run_all_button.config(state="disabled")
+            ttk.Label(
+                log_section,
+                text=config.get("hydra_unavailable_message", "Hydra unavailable."),
+                foreground="#f39c12",
+            ).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         hits_section = ttk.Frame(bottom_nb)
         hits_section.columnconfigure(0, weight=1)
@@ -276,6 +287,9 @@ class RunnerMixin:
         return [row["site"] for row in self.runner_rows_all if row.get("selected")]
 
     def run_selected_hydra(self):
+        if not config.get("runner_enabled", True):
+            messagebox.showwarning("Hydra Runner Disabled", config.get("hydra_unavailable_message", "Hydra is unavailable."))
+            return
         selected = self._get_selected_sites()
         if not selected:
             messagebox.showinfo("No Selection", "Select at least one row using the checkbox column.")
@@ -283,6 +297,9 @@ class RunnerMixin:
         self.start_runner_execution(selected)
 
     def run_all_hydra(self):
+        if not config.get("runner_enabled", True):
+            messagebox.showwarning("Hydra Runner Disabled", config.get("hydra_unavailable_message", "Hydra is unavailable."))
+            return
         if not self.runner_rows_view:
             messagebox.showinfo("No Sites", "No filtered sites available.")
             return
@@ -290,17 +307,23 @@ class RunnerMixin:
         self.start_runner_execution([row["site"] for row in self.runner_rows_view if row.get("selected")])
 
 
-    # NEW: Hydra backend detection (WSL preferred on Windows)
+    # NEW: Hydra auto-setup
     def _hydra_backend_for_runtime(self):
-        """Return 'wsl' or 'native' based on auto-detection and config preference."""
+        """Return runtime hydra mode and optional WSL distro set during startup checks."""
+        startup_mode = os.environ.get("PARSERPRO_HYDRA_MODE", "").strip().lower()
+        startup_distro = os.environ.get("PARSERPRO_WSL_DISTRO", "").strip()
+        if startup_mode in {"wsl", "native"}:
+            return {"mode": startup_mode, "distro": startup_distro}
+
         prefer_wsl = bool(config.get("prefer_wsl_hydra", True))
         status = ensure_hydra_available(log_func=self._write_log_threadsafe)
         if not status.get("available"):
             self.ui_queue.put(("critical_error", f"Hydra is not available: {status.get('message')}."))
             return None
-        if prefer_wsl and status.get("mode") == "wsl":
-            return "wsl"
-        return status.get("mode") or "native"
+        mode = status.get("mode") or "native"
+        if prefer_wsl and mode == "wsl":
+            return {"mode": "wsl", "distro": startup_distro}
+        return {"mode": mode, "distro": startup_distro}
 
     def _terminate_process_tree(self, process, reason):
         """Terminate process gracefully, escalating to kill if needed."""
@@ -347,8 +370,10 @@ class RunnerMixin:
         runner_log_file = LOGS_DIR / f"runner_{session_ts}.log"
         hydra_backend = self._hydra_backend_for_runtime()
         if not hydra_backend:
-            self.ui_queue.put(("runner_done", "Runner stopped: Hydra unavailable."))
+            self.ui_queue.put(("runner_done", config.get("hydra_unavailable_message", "Runner stopped: Hydra unavailable.")))
             return
+        backend_mode = hydra_backend.get("mode", "native")
+        backend_distro = hydra_backend.get("distro", "")
         timeout_seconds = int(config.get("hydra_timeout_seconds", 3600))
         for site in sites:
             if self.cancel_event.is_set():
@@ -407,8 +432,12 @@ class RunnerMixin:
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
 
             try:
-                if hydra_backend == "wsl":
-                    process = subprocess.Popen(["wsl", "bash", "-lc", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                if backend_mode == "wsl":
+                    wsl_cmd = ["wsl"]
+                    if backend_distro:
+                        wsl_cmd.extend(["-d", backend_distro])
+                    wsl_cmd.extend(["bash", "-lc", cmd])
+                    process = subprocess.Popen(wsl_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                 else:
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 

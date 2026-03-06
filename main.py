@@ -67,52 +67,61 @@ def _log_note(notes: list[str], text: str, logger: logging.Logger | None = None)
         print(f"[startup] {text}")
 
 
-def _hydra_wsl_available() -> bool:
+def _list_wsl_distros(logger: logging.Logger | None = None) -> list[str]:
+    # NEW: Hydra auto-setup - discover installed WSL distros.
     if os.name != "nt":
-        return False
+        return []
     try:
-        res = subprocess.run(["wsl", "hydra", "--version"], capture_output=True, text=True, timeout=20)
-        return res.returncode == 0
-    except Exception:
-        return False
-
-
-def _install_hydra_wsl(logger: logging.Logger | None = None) -> bool:
-    # FIX: Use explicit bash -lc install flow and clear fallback when sudo prompts are blocked.
-    command = ["wsl", "-d", "Ubuntu", "--", "bash", "-lc", "sudo apt update && sudo apt install -y hydra"]
-    try:
-        res = subprocess.run(command, capture_output=True, text=True, timeout=900)
-        if res.returncode == 0:
-            return True
-        err = (res.stderr or res.stdout or "").strip()
-        if logger:
-            logger.warning("WSL Hydra install failed: %s", err[:320])
+        result = subprocess.run(["wsl", "--list", "--quiet"], capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            _log_note([], f"wsl --list --quiet failed: {(result.stderr or result.stdout or '').strip()[:200]}", logger)
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except Exception as exc:
         if logger:
-            logger.warning("WSL Hydra install exception: %s", exc)
+            logger.warning("WSL distro discovery failed: %s", exc)
+        return []
+
+
+def _hydra_in_wsl_distro(distro: str, logger: logging.Logger | None = None) -> bool:
+    # NEW: Hydra auto-setup - check hydra in a specific distro.
+    try:
+        result = subprocess.run(["wsl", "-d", distro, "hydra", "--version"], capture_output=True, text=True, timeout=20)
+        if logger and result.returncode != 0:
+            logger.info("Hydra not found in WSL distro '%s'.", distro)
+        return result.returncode == 0
+    except Exception as exc:
+        if logger:
+            logger.info("Hydra check failed for WSL distro '%s': %s", distro, exc)
+        return False
+
+
+def _install_hydra_wsl_distro(distro: str, logger: logging.Logger | None = None) -> bool:
+    # NEW: Hydra auto-setup - install Hydra in first available distro.
+    command = ["wsl", "-d", distro, "--", "bash", "-lc", "sudo apt update && sudo apt install -y hydra"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1200)
+        if result.returncode == 0:
+            if logger:
+                logger.info("Hydra install succeeded in WSL distro '%s'.", distro)
+            return True
+        err = (result.stderr or result.stdout or "").strip()
+        if logger:
+            logger.warning("Hydra install failed in WSL distro '%s': %s", distro, err[:320])
+    except Exception as exc:
+        if logger:
+            logger.warning("Hydra install exception in WSL distro '%s': %s", distro, exc)
     return False
 
 
 def _install_hydra_windows(logger: logging.Logger | None = None) -> bool:
-    # FIX: Download and unpack Windows Hydra release asset into ./tools/hydra and update PATH.
+    # NEW: Hydra auto-setup - fallback to native Windows Hydra package.
     tools_dir = APP_DIR / "tools" / "hydra"
     tools_dir.mkdir(parents=True, exist_ok=True)
-    api_url = "https://api.github.com/repos/vanhauser-thc/thc-hydra/releases/latest"
+    zip_url = "https://github.com/maaaaz/thc-hydra-windows/releases/download/v9.1/hydra-9.1-win.zip"
     try:
-        release = requests.get(api_url, timeout=30)
-        release.raise_for_status()
-        payload = release.json()
-        assets = payload.get("assets") or []
-        win_asset = next(
-            (a for a in assets if "win" in (a.get("name") or "").lower() and (a.get("name") or "").lower().endswith(".zip")),
-            None,
-        )
-        if not win_asset:
-            if logger:
-                logger.warning("No Windows Hydra zip asset found in latest release.")
-            return False
-        archive = tools_dir / win_asset["name"]
-        with requests.get(win_asset["browser_download_url"], stream=True, timeout=120) as req:
+        archive = tools_dir / "hydra-9.1-win.zip"
+        with requests.get(zip_url, stream=True, timeout=120) as req:
             req.raise_for_status()
             with archive.open("wb") as fh:
                 for chunk in req.iter_content(8192):
@@ -137,24 +146,59 @@ def _install_hydra_windows(logger: logging.Logger | None = None) -> bool:
 
 
 def check_and_setup_prerequisites(logger: logging.Logger | None = None) -> list[str]:
-    # FIX: Full startup prerequisite auto-detection and best-effort install.
+    # NEW: Hydra auto-setup
     notes: list[str] = []
 
-    hydra_native = shutil.which("hydra") is not None
-    hydra_wsl = _hydra_wsl_available()
-    if hydra_native or hydra_wsl:
-        _log_note(notes, f"Hydra available ({'native' if hydra_native else 'wsl'})", logger)
+    os.environ.pop("PARSERPRO_WSL_DISTRO", None)
+    os.environ.pop("PARSERPRO_HYDRA_MODE", None)
+    config["runner_enabled"] = True
+
+    hydra_ready = False
+    if os.name == "nt":
+        distros = _list_wsl_distros(logger=logger)
+        _log_note(notes, f"Detected WSL distros: {', '.join(distros) if distros else 'none'}", logger)
+        selected_distro = None
+        for distro in distros:
+            _log_note(notes, f"Checking Hydra in WSL distro '{distro}'", logger)
+            if _hydra_in_wsl_distro(distro, logger=logger):
+                selected_distro = distro
+                break
+
+        if selected_distro:
+            os.environ["PARSERPRO_HYDRA_MODE"] = "wsl"
+            os.environ["PARSERPRO_WSL_DISTRO"] = selected_distro
+            hydra_ready = True
+            _log_note(notes, f"Hydra detected in WSL distro '{selected_distro}'", logger)
+        elif distros:
+            target_distro = distros[0]
+            _log_note(notes, f"Hydra not found in any distro; attempting install in '{target_distro}'", logger)
+            if _install_hydra_wsl_distro(target_distro, logger=logger) and _hydra_in_wsl_distro(target_distro, logger=logger):
+                os.environ["PARSERPRO_HYDRA_MODE"] = "wsl"
+                os.environ["PARSERPRO_WSL_DISTRO"] = target_distro
+                hydra_ready = True
+                _log_note(notes, f"Hydra installed in WSL distro '{target_distro}'", logger)
+                if not logger:
+                    messagebox.showinfo("Hydra setup", f"Hydra was installed in WSL distro '{target_distro}'.")
+
+        if not hydra_ready:
+            _log_note(notes, "Falling back to native Windows Hydra setup", logger)
+            hydra_ready = _install_hydra_windows(logger=logger) or shutil.which("hydra") is not None
+            if hydra_ready:
+                os.environ["PARSERPRO_HYDRA_MODE"] = "native"
+                _log_note(notes, "Native Windows Hydra is ready", logger)
+                if not logger:
+                    messagebox.showinfo("Hydra setup", "Hydra native binary is installed. Restart the app if command shell PATH was stale.")
     else:
-        _log_note(notes, "Hydra not found (native or WSL). Attempting auto-setup...", logger)
-        installed = False
-        if os.name == "nt":
-            installed = _install_hydra_wsl(logger=logger) and _hydra_wsl_available()
-            if not installed:
-                installed = _install_hydra_windows(logger=logger)
-        if installed:
-            _log_note(notes, "Hydra auto-install succeeded.", logger)
-        else:
-            notes.append("Hydra setup failed. Install manually: WSL Ubuntu `sudo apt install hydra` or Windows binary under ./tools/hydra.")
+        hydra_ready = shutil.which("hydra") is not None
+        if hydra_ready:
+            os.environ["PARSERPRO_HYDRA_MODE"] = "native"
+            _log_note(notes, "Hydra available natively", logger)
+
+    if not hydra_ready:
+        warn = "Hydra is still unavailable. GUI will load, but Hydra Runner is disabled."
+        notes.append(warn)
+        config["runner_enabled"] = False
+        config["hydra_unavailable_message"] = warn
 
     try:
         import webdriver_manager.chrome  # noqa: F401
