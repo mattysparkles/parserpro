@@ -41,6 +41,21 @@ try:
 except ImportError:
     HAS_2CAPTCHA = False
 
+try:
+    from anticaptchaofficial.recaptchav2proxyless import recaptchaV2Proxyless
+    from anticaptchaofficial.hcaptchaproxyless import hCaptchaProxyless
+
+    HAS_ANTICAPTCHA = True
+except ImportError:
+    HAS_ANTICAPTCHA = False
+
+try:
+    import requests
+
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 
 ERROR_CODE_MAP = {
     "ERR_NAME_NOT_RESOLVED": ("dns_failed", "DNS resolution failed"),
@@ -131,6 +146,8 @@ def fetch_page_playwright(url, proxy=None):
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
+        if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
+            effective_proxy = {"server": config.get("burp_proxy", "").strip()}
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
@@ -175,6 +192,8 @@ def fetch_page_selenium(url, proxy=None):
 
     try:
         effective_proxy = get_effective_proxy(config, proxy)
+        if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
+            effective_proxy = {"server": config.get("burp_proxy", "").strip()}
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
@@ -219,6 +238,69 @@ def fetch_page_selenium(url, proxy=None):
         return None, build_error_payload(code, hint, message, stacktrace=stack)
 
 
+def _solve_with_anticaptcha(captcha_type, sitekey, url):
+    if not HAS_ANTICAPTCHA or not config.get("anticaptcha_key"):
+        return None
+    key = config.get("anticaptcha_key")
+    try:
+        if captcha_type == "recaptcha":
+            solver = recaptchaV2Proxyless()
+            solver.set_verbose(0)
+            solver.set_key(key)
+            solver.set_website_url(url)
+            solver.set_website_key(sitekey)
+            return solver.solve_and_return_solution()
+        if captcha_type == "hcaptcha":
+            solver = hCaptchaProxyless()
+            solver.set_verbose(0)
+            solver.set_key(key)
+            solver.set_website_url(url)
+            solver.set_website_key(sitekey)
+            return solver.solve_and_return_solution()
+    except Exception as e:
+        logger.warn(f"Anti-Captcha failed: {e}")
+    return None
+
+
+def _solve_with_capsolver(captcha_type, sitekey, url):
+    if not HAS_REQUESTS or not config.get("capsolver_key"):
+        return None
+    task_type = {
+        "recaptcha": "ReCaptchaV2TaskProxyLess",
+        "hcaptcha": "HCaptchaTaskProxyLess",
+        "turnstile": "TurnstileTaskProxyLess",
+    }.get(captcha_type)
+    if not task_type:
+        return None
+
+    try:
+        payload = {
+            "clientKey": config.get("capsolver_key"),
+            "task": {
+                "type": task_type,
+                "websiteURL": url,
+                "websiteKey": sitekey,
+            },
+        }
+        create = requests.post("https://api.capsolver.com/createTask", json=payload, timeout=30).json()
+        task_id = create.get("taskId")
+        if not task_id:
+            logger.warn(f"Capsolver failed to create task: {create}")
+            return None
+        for _ in range(25):
+            result = requests.post(
+                "https://api.capsolver.com/getTaskResult",
+                json={"clientKey": config.get("capsolver_key"), "taskId": task_id},
+                timeout=30,
+            ).json()
+            if result.get("status") == "ready":
+                return (result.get("solution") or {}).get("gRecaptchaResponse") or (result.get("solution") or {}).get("token")
+            time.sleep(2)
+    except Exception as e:
+        logger.warn(f"Capsolver failed: {e}")
+    return None
+
+
 def solve_captcha(soup, url):
     captcha_type = None
     sitekey = None
@@ -240,26 +322,47 @@ def solve_captcha(soup, url):
     if not captcha_type or not sitekey:
         return None
 
-    token = None
-    if HAS_DEATHBYCAPTCHA and config.get("dbc_user") and config.get("dbc_pass"):
+    def _solve_with_dbc():
+        if not (HAS_DEATHBYCAPTCHA and config.get("dbc_user") and config.get("dbc_pass")):
+            return None
         try:
             client = get_dbc_client(config["dbc_user"], config["dbc_pass"])
             if client:
                 captcha = client.decode(sitekey=sitekey, url=url, type=captcha_type)
-                token = captcha["text"]
-            else:
-                logger.warn("DeathByCaptcha client unavailable (SocketClient/HttpClient not found); skipping DBC.")
+                return captcha["text"]
+            logger.warn("DeathByCaptcha client unavailable (SocketClient/HttpClient not found); skipping DBC.")
         except Exception as e:
             logger.warn(f"DeathByCaptcha failed: {e}")
+        return None
 
-    if not token and HAS_2CAPTCHA and config.get("twocaptcha_key"):
+    def _solve_with_2captcha():
+        if not (HAS_2CAPTCHA and config.get("twocaptcha_key")):
+            return None
         try:
             solver = TwoCaptcha(config["twocaptcha_key"])
             if captcha_type == "recaptcha":
-                token = solver.recaptcha(sitekey=sitekey, url=url)["code"]
-            elif captcha_type == "hcaptcha":
-                token = solver.hcaptcha(sitekey=sitekey, url=url)["code"]
+                return solver.recaptcha(sitekey=sitekey, url=url)["code"]
+            if captcha_type == "hcaptcha":
+                return solver.hcaptcha(sitekey=sitekey, url=url)["code"]
         except Exception as e:
             logger.warn(f"2Captcha failed: {e}")
+        return None
+
+    solvers = {
+        "deathbycaptcha": _solve_with_dbc,
+        "2captcha": _solve_with_2captcha,
+        "anticaptcha": lambda: _solve_with_anticaptcha(captcha_type, sitekey, url),
+        "capsolver": lambda: _solve_with_capsolver(captcha_type, sitekey, url),
+    }
+
+    token = None
+    provider_order = config.get("captcha_provider_order") or ["deathbycaptcha", "2captcha", "anticaptcha", "capsolver"]
+    for provider in provider_order:
+        solver = solvers.get(str(provider).strip().lower())
+        if not solver:
+            continue
+        token = solver()
+        if token:
+            break
 
     return token

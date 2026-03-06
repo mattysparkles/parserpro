@@ -17,10 +17,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
-from config import DATA_DIR, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, get_vpn_control, save_config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, get_effective_proxy, get_vpn_control, save_config
 from extract import extract_login_form
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
+from proxies import ProxyManager
 from project_io import (
     AutosaveWorker,
     atomic_write_json,
@@ -87,7 +88,13 @@ class CombinedParserGUI(RunnerMixin):
         self.strict_validation = tk.BooleanVar(value=True)
         self.force_recheck = tk.BooleanVar(value=bool(config.get("force_recheck", False)))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
+        self.use_burp = tk.BooleanVar(value=bool(config.get("use_burp", False)))
+        self.proxy_rotation = tk.BooleanVar(value=bool(config.get("proxy_rotation", False)))
+        self.proxy_list_file = tk.StringVar(value=config.get("proxy_list_file", ""))
         self.show_debug_details = tk.BooleanVar(value=False)
+        self.extract_log_file = None
+        self.runner_log_file = None
+        self.proxy_manager = None
 
         self.pipeline_running = False
         self.pipeline_paused = False
@@ -277,12 +284,12 @@ class CombinedParserGUI(RunnerMixin):
         entry = self.processed_data.get(base) or {}
         status = entry.get("status")
         if retry_failed_only:
-            if status != "fetch_failed":
+            if status not in {"fetch_failed", "failed"}:
                 return "not failed"
             return None
 
         failed_ttl_days = int(config.get("failed_retry_ttl_days", 1))
-        if status == "fetch_failed" and self._is_cache_fresh(entry, failed_ttl_days):
+        if status in {"fetch_failed", "failed"} and self._is_cache_fresh(entry, failed_ttl_days):
             return "recent fetch failure"
 
         ttl_days = int(config.get("cache_ttl_days", 30))
@@ -293,6 +300,9 @@ class CombinedParserGUI(RunnerMixin):
         return None
 
     def _write_log_threadsafe(self, text):
+        if self.extract_log_file:
+            with self.extract_log_file.open("a", encoding="utf-8") as fh:
+                fh.write(text + "\n")
         self.ui_queue.put(("extractor_log", text + "\n"))
 
     def _update_status_threadsafe(self, text):
@@ -317,8 +327,15 @@ class CombinedParserGUI(RunnerMixin):
             elif event == "hydra_log":
                 self.hydra_log.insert(tk.END, payload)
                 self.hydra_log.see(tk.END)
+                if self.runner_log_file:
+                    with self.runner_log_file.open("a", encoding="utf-8") as fh:
+                        fh.write(payload)
             elif event == "status":
                 self.status_text.set(payload)
+            elif event == "runner_hit":
+                hit = payload or {}
+                if hasattr(self, "hits_tree") and self.hits_tree is not None:
+                    self.hits_tree.insert("", "end", values=(hit.get("domain", ""), hit.get("username", ""), hit.get("password", ""), hit.get("timestamp", "")))
             elif event == "progress":
                 if payload["mode"] is not None:
                     self.progress["mode"] = payload["mode"]
@@ -521,7 +538,7 @@ class CombinedParserGUI(RunnerMixin):
         self.pause_button.pack(side="left", padx=4)
         self.cancel_button = ttk.Button(btn_f, text="Cancel", command=self.cancel_pipeline, state="disabled")
         self.cancel_button.pack(side="left", padx=(12, 4))
-        self.retry_button = ttk.Button(btn_f, text="Retry Failed", command=self.retry_failed)
+        self.retry_button = ttk.Button(btn_f, text="Resume Failed", command=self.resume_failed)
         self.retry_button.pack(side="left", padx=4)
         ttk.Button(btn_f, text="Settings", command=self.open_settings).pack(side="left", padx=4)
         ttk.Button(btn_f, text="Clear Log", command=self.clear_log).pack(side="left", padx=4)
@@ -548,7 +565,7 @@ class CombinedParserGUI(RunnerMixin):
         settings_window = tk.Toplevel(self.root)
         self.settings_window = settings_window
         settings_window.title("Settings")
-        settings_window.geometry("560x560")
+        settings_window.geometry("620x820")
 
         ttk.Label(settings_window, text="DeathByCaptcha Username").pack(pady=5)
         self.dbc_user = tk.StringVar(value=config.get("dbc_user", ""))
@@ -563,6 +580,17 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Entry(settings_window, textvariable=self.nord_token).pack(pady=5)
 
         ttk.Label(settings_window, text="2Captcha API Key (optional)").pack(pady=5)
+        self.twocaptcha_key = tk.StringVar(value=config.get("twocaptcha_key", ""))
+        ttk.Entry(settings_window, textvariable=self.twocaptcha_key).pack(pady=5, fill="x", padx=16)
+
+        ttk.Label(settings_window, text="Anti-Captcha API Key (optional)").pack(pady=5)
+        self.anticaptcha_key = tk.StringVar(value=config.get("anticaptcha_key", ""))
+        ttk.Entry(settings_window, textvariable=self.anticaptcha_key).pack(pady=5, fill="x", padx=16)
+
+        ttk.Label(settings_window, text="Capsolver API Key (optional)").pack(pady=5)
+        self.capsolver_key = tk.StringVar(value=config.get("capsolver_key", ""))
+        ttk.Entry(settings_window, textvariable=self.capsolver_key).pack(pady=5, fill="x", padx=16)
+
         ttk.Label(settings_window, text="VPN Control").pack(pady=5)
         self.vpn_control = tk.StringVar(value=get_vpn_control(config))
         ttk.Combobox(settings_window, textvariable=self.vpn_control, values=["none", "nordvpn"], state="readonly").pack(pady=5)
@@ -585,9 +613,6 @@ class CombinedParserGUI(RunnerMixin):
         self.failed_retry_ttl_days = tk.IntVar(value=int(config.get("failed_retry_ttl_days", 1)))
         ttk.Entry(settings_window, textvariable=self.failed_retry_ttl_days).pack(pady=5)
 
-        self.twocaptcha_key = tk.StringVar(value=config.get("twocaptcha_key", ""))
-        ttk.Entry(settings_window, textvariable=self.twocaptcha_key).pack(pady=5)
-
         self.debug_logging = tk.BooleanVar(value=bool(config.get("debug_logging", False)))
         ttk.Checkbutton(settings_window, text="Enable debug logging", variable=self.debug_logging).pack(pady=5)
 
@@ -600,14 +625,29 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Label(settings_window, text="Burp Proxy (optional, e.g. http://127.0.0.1:8080)").pack(pady=5)
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         ttk.Entry(settings_window, textvariable=self.burp_proxy).pack(pady=5, fill="x", padx=16)
+        ttk.Checkbutton(settings_window, text="Route all requests through Burp", variable=self.use_burp).pack(pady=5)
+
+        ttk.Checkbutton(settings_window, text="Enable proxy rotation", variable=self.proxy_rotation).pack(pady=5)
+        ttk.Label(settings_window, text="Proxy list file (one proxy per line)").pack(pady=5)
+        proxy_file_row = ttk.Frame(settings_window)
+        proxy_file_row.pack(fill="x", padx=16, pady=5)
+        ttk.Entry(proxy_file_row, textvariable=self.proxy_list_file).pack(side="left", fill="x", expand=True)
+        ttk.Button(proxy_file_row, text="Browse", command=self.choose_proxy_list_file).pack(side="left", padx=(8, 0))
 
         ttk.Button(settings_window, text="Save & Close", command=self.save_settings).pack(pady=20)
+
+    def choose_proxy_list_file(self):
+        fp = filedialog.askopenfilename(filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if fp:
+            self.proxy_list_file.set(fp)
 
     def save_settings(self):
         config['dbc_user'] = self.dbc_user.get()
         config['dbc_pass'] = self.dbc_pass.get()
         config['nord_token'] = self.nord_token.get()
         config['twocaptcha_key'] = self.twocaptcha_key.get()
+        config['anticaptcha_key'] = self.anticaptcha_key.get()
+        config['capsolver_key'] = self.capsolver_key.get()
         config['vpn_control'] = self.vpn_control.get().strip().lower()
         config['proxy_url'] = self.proxy_url_setting.get().strip()
         config['proxy_required'] = bool(self.proxy_required.get())
@@ -616,6 +656,9 @@ class CombinedParserGUI(RunnerMixin):
         config['failed_retry_ttl_days'] = max(1, int(self.failed_retry_ttl_days.get() or 1))
         config['force_recheck'] = bool(self.force_recheck.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
+        config['use_burp'] = bool(self.use_burp.get())
+        config['proxy_rotation'] = bool(self.proxy_rotation.get())
+        config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
         self.autosave_enabled.set(bool(self.autosave_enabled_setting.get()))
@@ -744,6 +787,10 @@ class CombinedParserGUI(RunnerMixin):
             "ignore_https_errors": bool(config.get("ignore_https_errors", False)),
             "allow_nonstandard_ports": bool(config.get("allow_nonstandard_ports", False)),
             "proxy_url": config.get("proxy_url", ""),
+            "burp_proxy": config.get("burp_proxy", ""),
+            "use_burp": bool(config.get("use_burp", False)),
+            "proxy_rotation": bool(config.get("proxy_rotation", False)),
+            "proxy_list_file": config.get("proxy_list_file", ""),
             "autosave_enabled": self.autosave_enabled.get(),
             "autosave_interval_minutes": self.autosave_interval_minutes.get(),
         }
@@ -1159,7 +1206,7 @@ class CombinedParserGUI(RunnerMixin):
         controls = ttk.Frame(tab, padding=12)
         controls.grid(row=0, column=0, sticky="ew")
         ttk.Button(controls, text="Refresh", command=self.refresh_troubleshooting_panel).pack(side="left", padx=4)
-        ttk.Button(controls, text="Retry Failed", command=self.retry_failed).pack(side="left", padx=4)
+        ttk.Button(controls, text="Resume Failed", command=self.resume_failed).pack(side="left", padx=4)
         ttk.Button(controls, text="Export Diagnostics CSV", command=self.export_diagnostics_csv).pack(side="left", padx=4)
 
         self.diag_summary = tk.Text(tab, height=8, wrap="word")
@@ -1249,12 +1296,15 @@ class CombinedParserGUI(RunnerMixin):
         self.retry_button.config(state="disabled")
         self.status_text.set("Running...")
         self.state_text.set("Running")
+        session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.extract_log_file = LOGS_DIR / f"extract_{session_ts}.log"
+        self.runner_log_file = LOGS_DIR / f"runner_{session_ts}.log"
         self._start_run_context("extraction")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(False,))
         self.processing_thread.start()
 
-    def retry_failed(self):
+    def resume_failed(self):
         if self.processing_thread and self.processing_thread.is_alive():
             messagebox.showinfo("Busy", "Pipeline is already running.")
             return
@@ -1269,9 +1319,12 @@ class CombinedParserGUI(RunnerMixin):
         self.pause_button.config(text="Pause", state="normal")
         self.cancel_button.config(state="normal")
         self.retry_button.config(state="disabled")
-        self.status_text.set("Retrying failed sites...")
+        self.status_text.set("Resuming failed sites...")
         self.state_text.set("Running")
-        self._start_run_context("extraction", notes="retry_failed_only")
+        session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.extract_log_file = LOGS_DIR / f"extract_{session_ts}.log"
+        self.runner_log_file = LOGS_DIR / f"runner_{session_ts}.log"
+        self._start_run_context("extraction", notes="resume_failed_only")
 
         self.processing_thread = threading.Thread(target=self.process_pipeline, daemon=True, args=(True,))
         self.processing_thread.start()
@@ -1366,6 +1419,7 @@ class CombinedParserGUI(RunnerMixin):
             self.record_event("ERROR", "run", "complete", final_msg)
         else:
             self.record_event("INFO", "run", "complete", final_msg)
+        self.extract_log_file = None
         messagebox.showinfo("Pipeline Status", final_msg)
 
         if self.gost_process:
@@ -1531,6 +1585,12 @@ class CombinedParserGUI(RunnerMixin):
                 self._write_log_threadsafe(f"Using configured proxy_url for extraction: {config.get('proxy_url', '').strip()}")
 
             proxy = get_effective_proxy(config, proxy_candidate)
+            if bool(config.get("use_burp", False)) and config.get("burp_proxy", "").strip():
+                proxy = {"server": config.get("burp_proxy", "").strip()}
+            self.proxy_manager = None
+            if bool(config.get("proxy_rotation", False)) and config.get("proxy_list_file", "").strip():
+                self.proxy_manager = ProxyManager(config.get("proxy_list_file", "").strip())
+                self._write_log_threadsafe(f"Proxy rotation enabled ({self.proxy_manager.size} proxies)")
             if config.get("proxy_url", "").strip() and not proxy:
                 self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"proxy_url": config.get("proxy_url", "").strip()})
 
@@ -1588,14 +1648,15 @@ class CombinedParserGUI(RunnerMixin):
                         for path in COMMON_LOGIN_PATHS:
                             urls_to_try.append(f"{clean_base}{path}")
 
-                    error_info = {"status": "fetch_failed", "error_message": "unknown"}
+                    error_info = {"status": "failed", "error_message": "unknown"}
+                    current_proxy = self.proxy_manager.get_proxy() if self.proxy_manager else proxy
                     for url in urls_to_try:
                         if not url:
                             continue
                         start_fetch = time.perf_counter()
                         form_data, error_info = extract_login_form(
                             url,
-                            proxy,
+                            current_proxy,
                             strict_validation=self.strict_validation.get(),
                             mode=str(config.get("analysis_mode", "static") or "static"),
                             observation_options={
@@ -1609,13 +1670,13 @@ class CombinedParserGUI(RunnerMixin):
 
                         if isinstance(error_info, dict) and error_info.get("status") == "skipped_invalid_target":
                             return error_info
-                        if isinstance(error_info, dict) and error_info.get("status") == "fetch_failed":
+                        if isinstance(error_info, dict) and error_info.get("status") in {"fetch_failed", "failed"}:
                             continue
                         if isinstance(error_info, dict) and error_info.get("status") == "no_form":
                             continue
 
                     rotation_counter += 1
-                    return error_info if isinstance(error_info, dict) else {"status": "fetch_failed", "error_message": str(error_info or "unknown")}
+                    return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
                 with ThreadPoolExecutor(max_workers=self.threads.get()) as executor:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
@@ -1694,11 +1755,11 @@ class CombinedParserGUI(RunnerMixin):
                                 hint = outcome.get("error_hint") or outcome.get("hint") or "Navigation failed"
                                 detail = outcome.get("error_detail") or outcome.get("error_message") or "fetch failed"
                                 stacktrace = outcome.get("error_stacktrace")
-                                entry.update({"status": "fetch_failed", "form_found": False, "last_error_code": code, "last_error_hint": hint, "last_error_detail": detail, "last_error_stacktrace": stacktrace})
+                                entry.update({"status": "failed", "form_found": False, "last_error_code": code, "last_error_hint": hint, "last_error_detail": detail, "last_error_stacktrace": stacktrace})
                                 extra = f" detail={detail}" if self.show_debug_details.get() else ""
                                 if self.show_debug_details.get() and stacktrace:
                                     extra += f" stack={stacktrace.splitlines()[-1]}"
-                                self._write_log_threadsafe(f"{base} :: status=fetch_failed confidence=0 reason={hint}{extra}")
+                                self._write_log_threadsafe(f"{base} :: status=failed confidence=0 reason={hint}{extra}")
                                 if code == "proxy_down":
                                     self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"site": base})
                                 elif code == "dns_failed":
@@ -1721,6 +1782,8 @@ class CombinedParserGUI(RunnerMixin):
 
                         self._update_progress_threadsafe(value=i)
                         self._update_status_threadsafe(f"Extracting: {i}/{total}")
+                        if i % 10 == 0:
+                            self.save_processed_data()
 
                 self._show_progress_threadsafe(False)
 
