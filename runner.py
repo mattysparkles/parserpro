@@ -399,6 +399,8 @@ class RunnerMixin:
 
             self._append_hydra_log_threadsafe(f"\n=== Starting command for {site} ===\n")
             self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
+            # FIX: Emit final Hydra command to stdout for startup/runner replacement debugging.
+            print(f"[runner-debug] final hydra command for {site}: {cmd}")
 
             try:
                 if hydra_backend == "wsl":

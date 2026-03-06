@@ -1,20 +1,27 @@
 import argparse
 import csv
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import webbrowser
 import warnings
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import tkinter as tk
+from tkinter import messagebox
+
+import requests
 
 try:
     from urllib3.exceptions import InsecureRequestWarning
 except ImportError:
     InsecureRequestWarning = Warning
 
-from config import DATA_DIR, LOGS_DIR, config, ensure_hydra_available, ensure_nordvpn_cli
+from config import APP_DIR, DATA_DIR, LOGS_DIR, config
 from extract import extract_login_form
 from fetch import ensure_chromedriver_available
 from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
@@ -51,24 +58,140 @@ def _build_headless_logger() -> logging.Logger:
 
 
 # NEW: startup checks for headless and GUI entry
-def run_startup_dependency_checks(logger: logging.Logger | None = None) -> list[str]:
-    """Run startup checks and return warning messages for missing dependencies."""
+def _log_note(notes: list[str], text: str, logger: logging.Logger | None = None) -> None:
+    # FIX: Centralized startup logging for prerequisite auto-setup.
+    notes.append(text)
+    if logger:
+        logger.info(text)
+    else:
+        print(f"[startup] {text}")
+
+
+def _hydra_wsl_available() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        res = subprocess.run(["wsl", "hydra", "--version"], capture_output=True, text=True, timeout=20)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _install_hydra_wsl(logger: logging.Logger | None = None) -> bool:
+    # FIX: Use explicit bash -lc install flow and clear fallback when sudo prompts are blocked.
+    command = ["wsl", "-d", "Ubuntu", "--", "bash", "-lc", "sudo apt update && sudo apt install -y hydra"]
+    try:
+        res = subprocess.run(command, capture_output=True, text=True, timeout=900)
+        if res.returncode == 0:
+            return True
+        err = (res.stderr or res.stdout or "").strip()
+        if logger:
+            logger.warning("WSL Hydra install failed: %s", err[:320])
+    except Exception as exc:
+        if logger:
+            logger.warning("WSL Hydra install exception: %s", exc)
+    return False
+
+
+def _install_hydra_windows(logger: logging.Logger | None = None) -> bool:
+    # FIX: Download and unpack Windows Hydra release asset into ./tools/hydra and update PATH.
+    tools_dir = APP_DIR / "tools" / "hydra"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    api_url = "https://api.github.com/repos/vanhauser-thc/thc-hydra/releases/latest"
+    try:
+        release = requests.get(api_url, timeout=30)
+        release.raise_for_status()
+        payload = release.json()
+        assets = payload.get("assets") or []
+        win_asset = next(
+            (a for a in assets if "win" in (a.get("name") or "").lower() and (a.get("name") or "").lower().endswith(".zip")),
+            None,
+        )
+        if not win_asset:
+            if logger:
+                logger.warning("No Windows Hydra zip asset found in latest release.")
+            return False
+        archive = tools_dir / win_asset["name"]
+        with requests.get(win_asset["browser_download_url"], stream=True, timeout=120) as req:
+            req.raise_for_status()
+            with archive.open("wb") as fh:
+                for chunk in req.iter_content(8192):
+                    if chunk:
+                        fh.write(chunk)
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(tools_dir)
+    except Exception as exc:
+        if logger:
+            logger.warning("Native Windows Hydra install failed: %s", exc)
+        return False
+
+    hydra_exe = next(tools_dir.rglob("hydra.exe"), None)
+    if not hydra_exe:
+        if logger:
+            logger.warning("Hydra install archive extracted but hydra.exe was not found.")
+        return False
+    hydra_dir = str(hydra_exe.parent)
+    if hydra_dir.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = f"{hydra_dir};{os.environ.get('PATH', '')}" if os.environ.get("PATH") else hydra_dir
+    return True
+
+
+def check_and_setup_prerequisites(logger: logging.Logger | None = None) -> list[str]:
+    # FIX: Full startup prerequisite auto-detection and best-effort install.
     notes: list[str] = []
-    hydra = ensure_hydra_available(log_func=(logger.info if logger else None))
-    if not hydra.get("available"):
-        notes.append(f"Hydra unavailable: {hydra.get('message')}")
+
+    hydra_native = shutil.which("hydra") is not None
+    hydra_wsl = _hydra_wsl_available()
+    if hydra_native or hydra_wsl:
+        _log_note(notes, f"Hydra available ({'native' if hydra_native else 'wsl'})", logger)
+    else:
+        _log_note(notes, "Hydra not found (native or WSL). Attempting auto-setup...", logger)
+        installed = False
+        if os.name == "nt":
+            installed = _install_hydra_wsl(logger=logger) and _hydra_wsl_available()
+            if not installed:
+                installed = _install_hydra_windows(logger=logger)
+        if installed:
+            _log_note(notes, "Hydra auto-install succeeded.", logger)
+        else:
+            notes.append("Hydra setup failed. Install manually: WSL Ubuntu `sudo apt install hydra` or Windows binary under ./tools/hydra.")
+
+    try:
+        import webdriver_manager.chrome  # noqa: F401
+
+        _log_note(notes, "Selenium/WebDriverManager import check passed.", logger)
+    except Exception as exc:
+        notes.append(f"webdriver_manager not available: {exc}. Install via `pip install webdriver-manager selenium`.")
+
     chromedriver_ok, chromedriver_msg, _ = ensure_chromedriver_available()
-    if not chromedriver_ok:
+    if chromedriver_ok:
+        _log_note(notes, "Chromedriver check passed.", logger)
+    else:
         notes.append(f"Chromedriver setup warning: {chromedriver_msg}")
-    if str(config.get("vpn_control", "none")).lower() == "nordvpn":
-        nord = ensure_nordvpn_cli(log_func=(logger.info if logger else None))
-        if not nord.get("available"):
-            notes.append("NordVPN CLI missing (required for vpn_control=nordvpn)")
+
+    nord_candidates = [
+        shutil.which("nordvpn"),
+        shutil.which("nordvpncli"),
+        r"C:\Program Files\NordVPN\nordvpn.exe",
+        r"C:\Program Files\NordVPN\NordVPN.exe",
+    ]
+    nord_ok = any(candidate and (os.path.sep not in str(candidate) or Path(candidate).exists()) for candidate in nord_candidates)
+    if nord_ok:
+        _log_note(notes, "NordVPN CLI check passed.", logger)
+    else:
+        notes.append("NordVPN CLI not found. Download from https://nordvpn.com/download/windows/ if VPN control is required.")
+        try:
+            webbrowser.open("https://nordvpn.com/download/windows/")
+        except Exception:
+            pass
+
     return notes
+
 def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) -> int:
     logger = _build_headless_logger()
-    for warning in run_startup_dependency_checks(logger):
-        logger.warning(warning)
+    for warning in check_and_setup_prerequisites(logger):
+        if "failed" in warning.lower() or "warning" in warning.lower() or "not found" in warning.lower():
+            logger.warning(warning)
     rows = []
     site_combos = {}
     for raw in input_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -160,8 +283,13 @@ def main() -> None:
             raise SystemExit("--headless requires --extract and --forms-output")
         raise SystemExit(run_headless_extract(Path(args.extract), Path(args.forms_output), args.run_hydra))
 
-    for warning in run_startup_dependency_checks():
-        print(f"[startup-warning] {warning}")
+    startup_notes = check_and_setup_prerequisites()
+    startup_warnings = [n for n in startup_notes if any(flag in n.lower() for flag in ("failed", "warning", "not found"))]
+    if startup_warnings:
+        root_warn = tk.Tk()
+        root_warn.withdraw()
+        messagebox.showwarning("ParserPro startup prerequisites", "\n".join(startup_warnings))
+        root_warn.destroy()
     root = tk.Tk()
     CombinedParserGUI(root)
     root.mainloop()

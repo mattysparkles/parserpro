@@ -237,13 +237,13 @@ Suggested next improvements:
 
 ## Auto-setup and runtime safety (new)
 
-- **Hydra auto-detection/install**: ParserPro now checks Hydra availability on startup/runner start.
+- **Hydra auto-detection/install**: `main.py` now runs `check_and_setup_prerequisites()` before GUI startup (and headless startup), then runner checks again before execution.
   - On Windows it prefers **WSL Hydra** when available (`wsl hydra --version`).
-  - If missing in WSL, it attempts: `wsl -d Ubuntu -- sudo apt update && sudo apt install -y hydra`.
+  - If missing in WSL, it attempts: `wsl -d Ubuntu -- bash -lc "sudo apt update && sudo apt install -y hydra"`.
   - If native Hydra is missing, it attempts to download/extract a Windows release under `tools/hydra` and updates PATH (`setx`).
   - If PATH was updated, you may need to restart your shell/app session.
 - **Selenium/Chromedriver auto-setup**: uses `webdriver_manager.chrome` to provision Chromedriver when not manually configured.
-- **NordVPN on Windows**: now checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and warns in the GUI.
+- **NordVPN on Windows**: now checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and raises a startup warning dialog with manual steps.
 - **Form method handling**: non-POST forms are retained, and Hydra templates use:
   - `http-post-form` for POST
   - `http-get-form` for GET
