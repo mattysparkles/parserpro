@@ -2,9 +2,11 @@ import argparse
 import csv
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import webbrowser
 import warnings
 from datetime import datetime
@@ -197,6 +199,37 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
     return 0
 
 
+def _is_startup_warning(note: str) -> bool:
+    lowered = note.lower()
+    return any(flag in lowered for flag in ("failed", "warning", "not found", "unavailable"))
+
+
+def _schedule_gui_startup_checks(root: tk.Tk) -> None:
+    """Run dependency checks in the background so the GUI appears immediately."""
+    if not bool(config.get("startup_dependency_checks", True)):
+        return
+
+    results: queue.Queue[list[str]] = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        notes = check_and_setup_prerequisites()
+        results.put(notes)
+
+    def _poll_results() -> None:
+        try:
+            notes = results.get_nowait()
+        except queue.Empty:
+            root.after(250, _poll_results)
+            return
+
+        startup_warnings = [n for n in notes if _is_startup_warning(n)]
+        if startup_warnings:
+            messagebox.showwarning("ParserPro startup prerequisites", "\n".join(startup_warnings))
+
+    threading.Thread(target=_worker, name="startup-checks", daemon=True).start()
+    root.after(250, _poll_results)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ParserPro GUI/headless runner")
     parser.add_argument("--extract", help="Path to combo input file")
@@ -210,15 +243,9 @@ def main() -> None:
             raise SystemExit("--headless requires --extract and --forms-output")
         raise SystemExit(run_headless_extract(Path(args.extract), Path(args.forms_output), args.run_hydra))
 
-    startup_notes = check_and_setup_prerequisites()
-    startup_warnings = [n for n in startup_notes if any(flag in n.lower() for flag in ("failed", "warning", "not found"))]
-    if startup_warnings:
-        root_warn = tk.Tk()
-        root_warn.withdraw()
-        messagebox.showwarning("ParserPro startup prerequisites", "\n".join(startup_warnings))
-        root_warn.destroy()
     root = tk.Tk()
     CombinedParserGUI(root)
+    _schedule_gui_startup_checks(root)
     root.mainloop()
 
 
