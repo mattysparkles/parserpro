@@ -425,29 +425,21 @@ def _download_hydra_windows_binary(log_func=None):
 
 
 def _add_dir_to_path_windows(path_obj: Path) -> dict:
-    """Add a directory to PATH for current process and try persisting via setx."""
+    """Add a directory to PATH for the current process only.
+
+    NOTE: This intentionally does not use setx to persist PATH updates because
+    replacing PATH from a single process can accidentally drop critical entries
+    (for example Python) in user/system PATH.
+    """
     target = str(path_obj)
-    path_now = os.environ.get("PATH", "")
-    if target.lower() in path_now.lower():
+    current_entries = [entry for entry in os.environ.get("PATH", "").split(";") if entry]
+    lower_entries = {entry.lower() for entry in current_entries}
+    if target.lower() in lower_entries:
         return {"session_updated": False, "persisted": False}
 
-    merged = f"{path_now};{target}" if path_now else target
-    os.environ["PATH"] = merged
-
-    persisted = False
-    try:
-        res = subprocess.run(
-            ["setx", "PATH", merged],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-        persisted = res.returncode == 0
-    except Exception:
-        persisted = False
-    return {"session_updated": True, "persisted": persisted}
+    current_entries.append(target)
+    os.environ["PATH"] = ";".join(current_entries)
+    return {"session_updated": True, "persisted": False}
 
 
 def ensure_hydra_available(log_func=None):
@@ -495,7 +487,7 @@ def check_and_setup_hydra(log_func=None):
             verified = shutil.which("hydra") is not None
             message = "Hydra installed natively on Windows"
             if path_result.get("session_updated") and not path_result.get("persisted"):
-                message += "; session PATH updated (run setx PATH to persist and restart shells)"
+                message += "; session PATH updated (persistent PATH was not modified)"
             elif path_result.get("persisted"):
                 message += "; PATH persisted via setx (restart shells may be required)"
             if log_func:
@@ -534,7 +526,7 @@ def ensure_nordvpn_cli(log_func=None):
         if os.name == "nt" and bool(config.get("auto_configure_nordvpn_path", True)):
             path_result = _add_dir_to_path_windows(path_obj.parent)
             if log_func and path_result.get("session_updated") and not path_result.get("persisted"):
-                log_func("NordVPN path added for current session; run setx PATH for a permanent update.")
+                log_func("NordVPN path added for current session only; persistent PATH was not modified.")
         return {"available": True, "path": str(path_obj)}
 
     if log_func:
