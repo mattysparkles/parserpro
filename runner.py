@@ -364,13 +364,28 @@ class RunnerMixin:
                 continue
 
             combo_path = self.processed_data.get(site, {}).get("combo_path")
-            combo_file = Path(combo_path) if combo_path else DATA_DIR / get_site_filename(site)
+            combo_file_name = get_site_filename(site)
+            # FIX: Prefer the per-site generated filename from helpers.get_site_filename(base).
+            combo_file = DATA_DIR / combo_file_name
+            if combo_path:
+                combo_candidate = Path(combo_path)
+                if combo_candidate.exists():
+                    combo_file = combo_candidate
             if not combo_file.exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing for {site}: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
+            # FIX: Replace placeholder with the actual per-site combo file path.
             cmd = cmd_template.replace("{{combo_file}}", str(combo_file.resolve()))
+            # FIX: Upgrade legacy templates from -L/-P (same combo file) to Hydra combo mode (-C).
+            combo_escaped = re.escape(str(combo_file.resolve()))
+            cmd = re.sub(
+                rf'-L\s+"?{combo_escaped}"?\s+-P\s+"?{combo_escaped}"?',
+                f'-C "{combo_file.resolve()}"',
+                cmd,
+                count=1,
+            )
             burp_proxy = config.get("burp_proxy", "").strip() if bool(config.get("use_burp", False)) else ""
             if burp_proxy and " -p " not in f" {cmd} ":
                 cmd = f"{cmd} -p {burp_proxy}"
