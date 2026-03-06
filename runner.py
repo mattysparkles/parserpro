@@ -407,7 +407,7 @@ class RunnerMixin:
             combo_escaped = re.escape(str(combo_file.resolve()))
             cmd = re.sub(
                 rf'-L\s+"?{combo_escaped}"?\s+-P\s+"?{combo_escaped}"?',
-                f'-C "{combo_file.resolve()}"',
+                lambda _m: f'-C "{combo_file.resolve()}"',
                 cmd,
                 count=1,
             )
@@ -437,9 +437,26 @@ class RunnerMixin:
                     if backend_distro:
                         wsl_cmd.extend(["-d", backend_distro])
                     wsl_cmd.extend(["bash", "-lc", cmd])
-                    process = subprocess.Popen(wsl_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    process = subprocess.Popen(
+                        wsl_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
                 else:
-                    process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    process = subprocess.Popen(
+                        cmd,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
 
                 self.runner_active_process = process
                 self.register_running_process(process)
