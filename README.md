@@ -19,7 +19,9 @@ ParserPro is a modular Python toolkit that ingests combo lists, normalizes/organ
   - `vpn_control` (`none` by default, optional `nordvpn`) for VPN automation mode selection.
   - `proxy_url` routing for an already-running SOCKS/HTTP proxy.
   - Burp proxy routing for extraction and runner command composition.
-  - CAPTCHA solving integration (DeathByCaptcha / 2Captcha).
+  - CAPTCHA solving integration (DeathByCaptcha / 2Captcha / Anti-Captcha / Capsolver).
+  - Proxy-list rotation (`proxies.txt`) for extraction and runner execution.
+  - Headless CLI mode (`--headless`) for extraction + optional hydra execution.
 
 ## Project structure
 
@@ -45,6 +47,9 @@ Then launch:
 
 ```bash
 python main.py
+
+# headless mode
+python main.py --headless --extract combos.txt --forms-output hydra_forms.csv --run-hydra
 ```
 
 ## Optional dependencies
@@ -162,6 +167,8 @@ GUI Settings includes:
 
 - DeathByCaptcha username/password
 - 2Captcha API key
+- Anti-Captcha API key
+- Capsolver API key
 - NordVPN token
 - VPN control (`none` or `nordvpn`)
 - Proxy URL (`proxy_url`, optional socks5/http endpoint)
@@ -171,6 +178,8 @@ GUI Settings includes:
 - Failed-fetch retry TTL days (`failed_retry_ttl_days`, default `1`)
 - Force recheck toggle (`force_recheck`, default `false`)
 - Burp Proxy (example: `http://127.0.0.1:8080`)
+- Route all requests through Burp (`use_burp`)
+- Enable proxy rotation + proxy list file (`proxy_rotation`, `proxy_list_file`)
 - `ignore_https_errors` in `data/config.json` (default `false`)
 
 When Burp proxy is configured, extraction fetchers are routed through it and runner command composition appends proxy args.
@@ -180,7 +189,9 @@ When Burp proxy is configured, extraction fetchers are routed through it and run
 - Start Burp and ensure proxy listener is active.
 - Set `Burp Proxy` in Settings.
 - If inspecting HTTPS traffic, install Burp CA certificate in the system/browser context used by your tooling.
-- Some environments may also need certificate overrides for Python requests / browser contexts.
+- For Python HTTPS clients, add Burp CA to your cert bundle (or set `REQUESTS_CA_BUNDLE=/path/to/cacert.pem`).
+- Playwright/Selenium traffic is proxied when **Route all requests through Burp** is enabled.
+- Hydra commands also append `-p <burp_proxy>` when Burp routing is enabled.
 
 
 ### Windows recommendation
@@ -197,6 +208,8 @@ Recommended setup:
 - `hydra_forms.csv` (name user-defined)
 - `data/<site>.txt` per-site combos
 - `data/hits_<site>.txt` runner output hits
+- `hits/<domain>.txt` normalized hit output with timestamps
+- `logs/*.log` timestamped extraction / runner / headless session logs
 - `data/processed_sites.json` run metadata
 - `data/config.json` settings
 

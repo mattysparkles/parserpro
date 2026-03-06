@@ -15,6 +15,10 @@ from helpers import log_once
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = APP_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+HITS_DIR = APP_DIR / "hits"
+HITS_DIR.mkdir(parents=True, exist_ok=True)
 
 LEGACY_CONFIG_FILE = APP_DIR / "config.json"
 LEGACY_PROCESSED_SITES_FILE = APP_DIR / "processed_sites.json"
@@ -119,6 +123,13 @@ def load_config():
     loaded.setdefault("vpn_control", "none")
     loaded.setdefault("proxy_url", "")
     loaded.setdefault("proxy_required", False)
+    loaded.setdefault("use_burp", False)
+    loaded.setdefault("burp_proxy", "")
+    loaded.setdefault("proxy_rotation", False)
+    loaded.setdefault("proxy_list_file", "")
+    loaded.setdefault("anticaptcha_key", "")
+    loaded.setdefault("capsolver_key", "")
+    loaded.setdefault("captcha_provider_order", ["deathbycaptcha", "2captcha", "anticaptcha", "capsolver"])
     loaded.setdefault("allow_nonstandard_ports", False)
     loaded.setdefault("force_recheck", False)
     loaded.setdefault("cache_ttl_days", 30)

