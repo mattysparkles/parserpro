@@ -388,19 +388,17 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
-            # FIXED: Resolve combo filename using helpers.get_site_filename(site) as required.
-            combo_file = get_site_filename(site)
-            combo_file_path = Path(combo_file)
+            combo_file_path = self._resolve_combo_file_path(site)
             if not combo_file_path.exists():
                 self._append_hydra_log_threadsafe(f"[ERROR] Combo file missing for {site}: {combo_file_path}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
+            combo_file = str(combo_file_path.resolve())
+
             # FIXED: Force Hydra combined-credential mode and replace all supported combo placeholders.
             cmd = str(cmd_template)
             cmd = cmd.replace("{{combo_file}}", combo_file)
-            cmd = cmd.replace('"{combo_file}"', combo_file)
-            cmd = cmd.replace("'{combo_file}'", combo_file)
             cmd = cmd.replace("{combo_file}", combo_file)
             cmd = cmd.replace(" -L ", " -C ").replace(" -P ", " ")
 
@@ -492,6 +490,21 @@ class RunnerMixin:
 
         msg = "Runner cancelled." if self.cancel_event.is_set() else "Runner complete."
         self.ui_queue.put(("runner_done", msg))
+
+    def _resolve_combo_file_path(self, site):
+        site_data = self.processed_data.get(site, {}) if isinstance(self.processed_data, dict) else {}
+        configured_combo_path = str(site_data.get("combo_path", "")).strip()
+        if configured_combo_path:
+            configured_path = Path(configured_combo_path)
+            if configured_path.exists():
+                return configured_path
+
+        combo_file = get_site_filename(site)
+        data_combo = DATA_DIR / combo_file
+        if data_combo.exists():
+            return data_combo
+
+        return Path(combo_file)
 
     def _set_row_status(self, site, status):
         for row in self.runner_rows_all:
