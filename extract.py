@@ -381,7 +381,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIX: Switched to -C for combined user:pass combos and kept {{combo_file}} placeholder for runner replacement.
+            # FIXED: Use combined user:pass combo mode with a stable {{combo_file}} placeholder.
             hydra_template = f'hydra -C "{{{{combo_file}}}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
         else:
             custom_tester_required = True
