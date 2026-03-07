@@ -122,6 +122,7 @@ def get_dbc_client(user, password):
 
 
 def _fetch_page_playwright_once(clean_url, effective_proxy):
+    # FIXED: Proxy fallback + single chromedriver check
     launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
     if effective_proxy:
         launch_args["proxy"] = {"server": effective_proxy["server"]}
@@ -169,6 +170,13 @@ def fetch_page_playwright(url, proxy=None):
             code, hint = classify_nav_error(str(e))
             detail = str(e)
 
+            if effective_proxy and not retried_without_proxy:
+                logger.warn(f"[Proxy Fallback] Playwright proxy failed ({detail}); retrying direct connection")
+                log_once("proxy-fallback-playwright", "[Proxy Fallback] Using direct connection", level="WARN")
+                effective_proxy = None
+                retried_without_proxy = True
+                continue
+
             if code == "proxy_down" and effective_proxy and not retried_without_proxy:
                 log_once("proxy-down", "Proxy appears unreachable; retrying once without proxy", level="WARN")
                 effective_proxy = None
@@ -203,6 +211,8 @@ def ensure_chromedriver_available() -> tuple[bool, str, Optional[str]]:
         return True, "chromedriver_ready", driver_path
     except Exception as exc:
         return False, f"chromedriver_auto_setup_failed: {exc}", None
+
+
 def fetch_page_selenium(url, proxy=None):
     """Fetch page HTML using Selenium with webdriver_manager fallback."""
     if not HAS_SELENIUM:
@@ -217,69 +227,78 @@ def fetch_page_selenium(url, proxy=None):
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
+    # FIXED: Proxy fallback + single chromedriver check
     driver = None
-    try:
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        if effective_proxy and effective_proxy.get("server"):
-            options.add_argument(f"--proxy-server={effective_proxy['server']}")
+    retried_without_proxy = False
+    current_proxy = effective_proxy
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
+        driver = None
+        try:
+            options = Options()
+            options.add_argument("--headless")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            if current_proxy and current_proxy.get("server"):
+                options.add_argument(f"--proxy-server={current_proxy['server']}")
 
-        if bool(config.get("ignore_https_errors", False)):
-            options.add_argument("--ignore-certificate-errors")
+            if bool(config.get("ignore_https_errors", False)):
+                options.add_argument("--ignore-certificate-errors")
 
-        driver_path = (config.get("chrome_driver_path") or "").strip()
-        if not driver_path and bool(config.get("auto_setup_chromedriver", True)) and HAS_WEBDRIVER_MANAGER:
-            ok, msg, managed_path = ensure_chromedriver_available()
-            if ok and managed_path:
-                logger.info(f"Selenium auto-setup success: {msg}")
-                driver_path = managed_path
+            driver_path = (config.get("chrome_driver_path") or "").strip()
+            if driver_path:
+                service = ChromeService(executable_path=driver_path)
+                driver = webdriver.Chrome(service=service, options=options)
             else:
-                logger.warn(f"Selenium auto-setup fallback: {msg}")
+                driver = webdriver.Chrome(options=options)
 
-        if driver_path:
-            service = ChromeService(executable_path=driver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-        else:
-            driver = webdriver.Chrome(options=options)
+            # Prevent edge-case pages from blocking extraction indefinitely.
+            driver.set_page_load_timeout(35)
 
-        # Prevent edge-case pages from blocking extraction indefinitely.
-        driver.set_page_load_timeout(35)
+            driver.get(clean_url)
+            time.sleep(5)
+            html = driver.page_source
+            return html, None
+        except Exception as e:
+            stack = _debug_stack(f"Selenium failed {clean_url}", e)
+            code, hint = classify_nav_error(str(e))
+            message = str(e)
 
-        driver.get(clean_url)
-        time.sleep(5)
-        html = driver.page_source
-        return html, None
-    except Exception as e:
-        stack = _debug_stack(f"Selenium failed {clean_url}", e)
-        code, hint = classify_nav_error(str(e))
-        message = str(e)
-        if "timeout" in message.lower():
-            return None, build_error_payload(
-                "fetch_timeout",
-                "Page load timed out",
-                "Selenium timed out while loading this page; skipped to keep extraction moving",
-                stacktrace=stack,
-            )
-        if "driver" in message.lower() or "chromedriver" in message.lower():
-            return None, build_error_payload(
-                "driver_error",
-                "browser driver is missing or misconfigured",
-                f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json",
-                stacktrace=stack,
-            )
-        if code in {"tls_mismatch", "cert_invalid"} and effective_proxy:
-            log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS", level="WARN")
-        return None, build_error_payload(code, hint, message, stacktrace=stack)
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            if current_proxy and not retried_without_proxy:
+                logger.warn(f"[Proxy Fallback] Selenium proxy failed ({message}); retrying direct connection")
+                log_once("proxy-fallback-selenium", "[Proxy Fallback] Using direct connection", level="WARN")
+                current_proxy = None
+                retried_without_proxy = True
+                continue
+
+            if "timeout" in message.lower():
+                return None, build_error_payload(
+                    "fetch_timeout",
+                    "Page load timed out",
+                    "Selenium timed out while loading this page; skipped to keep extraction moving",
+                    stacktrace=stack,
+                )
+            if "driver" in message.lower() or "chromedriver" in message.lower():
+                return None, build_error_payload(
+                    "driver_error",
+                    "browser driver is missing or misconfigured",
+                    f"{message}. Ensure Chrome/Chromium is installed or set chrome_driver_path in config.json",
+                    stacktrace=stack,
+                )
+            if code in {"tls_mismatch", "cert_invalid"} and current_proxy:
+                log_once("proxy-tls-hint-selenium", "TLS error detected while proxy is enabled; proxy may be breaking TLS", level="WARN")
+            return None, build_error_payload(code, hint, message, stacktrace=stack)
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+    return None, build_error_payload("fetch_failed", "Navigation failed", "unknown selenium failure")
 
 
 def _solve_with_anticaptcha(captcha_type, sitekey, url):

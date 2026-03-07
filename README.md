@@ -280,6 +280,10 @@ In `data/config.json`:
   Your SOCKS proxy endpoint is not reachable (commonly `127.0.0.1:1080` when gost is not running). Disable proxy settings (`burp_proxy`, `socks_proxy`, `proxy`) or start the proxy process.
 - **Verify proxy health quickly**
   Confirm the listener is up before extraction, e.g. `python -c "import socket;print(socket.create_connection(('127.0.0.1',1080),1))"` (should connect without exception).
+- **Windows proxy startup check / fallback**
+  On GUI startup, ParserPro tests `proxy_url` against `https://httpbin.org/ip` (5s timeout). If the proxy test fails, proxy is disabled in config and a warning is shown, then extraction continues directly.
+- **Chromedriver repeated setup logs**
+  Chromedriver is initialized once at startup and reused via `chrome_driver_path`, avoiding repeated per-request webdriver-manager installs/fallback noise.
 ## Extraction cache behavior
 
 - Cache is stored in `data/processed_sites.json` and reused on later runs.
