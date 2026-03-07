@@ -400,15 +400,20 @@ class RunnerMixin:
             cmd_template = str(cmd_template)
             self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
 
-            # FIXED: Removed extra ^ + Windows & escaping + loosened validation
+            # FIXED: Removed literal \1 leak + safe quote strip without backrefs
             combo_file = combo_file.replace("\\", "/")  # Hydra prefers forward slashes
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[RAW CMD AFTER REPLACE] {cmd}\n")
 
-            # Simple quote dedup (no capture groups)
+            # Defensive quote cleanup (no backreferences)
             cmd = cmd.replace('http-post-form ""', 'http-post-form "')
-            cmd = cmd.replace('"" ', '" ')  # trailing double
-            self._append_hydra_log_threadsafe(f"[AFTER QUOTE DEDUP] {cmd}\n")
+            cmd = cmd.replace('"" ', '" ')
+            cmd = cmd.replace('""', '"')
+            self._append_hydra_log_threadsafe(f"[AFTER QUOTE STRIP] {cmd}\n")
+
+            cmd = cmd.replace('\\1', '')
+            cmd = cmd.replace('\1', '')
+            self._append_hydra_log_threadsafe(f"[AFTER LEAK CLEAN] {cmd}\n")
 
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
@@ -416,25 +421,22 @@ class RunnerMixin:
                 continue
 
             # Remove duplicate ^
-            cmd = cmd.replace("^^", "^")
-            self._append_hydra_log_threadsafe(f"[AFTER CARET CLEAN] {cmd}\n")
+            cmd = re.sub(r'\^{2,}', '^', cmd)
 
             # Escape & for cmd.exe
             cmd = cmd.replace("&", "^&")
-            self._append_hydra_log_threadsafe(f"[AFTER ESCAPE] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[AFTER & ESCAPE] {cmd}\n")
 
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
-            self._append_hydra_log_threadsafe(f"[EXECUTING FINAL] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[FINAL EXECUTING] {cmd}\n")
 
             # Validation - continue even with minor issues
-            if "\\1" in cmd:
-                self._append_hydra_log_threadsafe("[WARN] \\1 detected (regex failure); skipping\n")
-                self._set_row_status(site, "Failed")
-                continue
+            if '""' in cmd or '\1' in cmd or '^^' in cmd:
+                self._append_hydra_log_threadsafe("[WARN] Minor quoting/artifact detected — continuing anyway\n")
             if cmd.count(combo_file) != 1 or "-C" not in cmd:
-                self._append_hydra_log_threadsafe("[SKIP] Invalid cmd\n")
+                self._append_hydra_log_threadsafe("[SKIP] Critical cmd invalid\n")
                 self._set_row_status(site, "Failed")
                 continue
 
