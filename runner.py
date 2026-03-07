@@ -405,41 +405,36 @@ class RunnerMixin:
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
 
-            # Clean nested quotes around the form spec
-            cmd = re.sub(r'http-post-form ""(.*?)""', r'http-post-form "\\1"', cmd)
-            cmd = re.sub(r'http-post-form "(.*?)"', r'http-post-form "\\1"', cmd)
-            self._append_hydra_log_threadsafe(f"[AFTER QUOTE CLEAN] {cmd}\n")
-
-            form_spec = ""
-            match = re.search(r'http-post-form\s+"([^"]+)"', cmd)
-            if match:
-                form_spec = match.group(1)
-                self._append_hydra_log_threadsafe(f"[RAW FORM SPEC] {form_spec}\n")
+            # Simple quote dedup (no capture groups)
+            cmd = cmd.replace('http-post-form ""', 'http-post-form "')
+            cmd = cmd.replace('"" ', '" ')  # trailing double
+            self._append_hydra_log_threadsafe(f"[AFTER QUOTE DEDUP] {cmd}\n")
 
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            cmd = re.sub(r'\^{2,}', '^', cmd)
+            # Remove duplicate ^
+            cmd = cmd.replace("^^", "^")
+            self._append_hydra_log_threadsafe(f"[AFTER CARET CLEAN] {cmd}\n")
+
+            # Escape & for cmd.exe
+            cmd = cmd.replace("&", "^&")
+            self._append_hydra_log_threadsafe(f"[AFTER ESCAPE] {cmd}\n")
+
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
-            if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower() and "&" in cmd:
-                cmd = cmd.replace("&", "^&")
-            self._append_hydra_log_threadsafe(f"[AFTER ESCAPE] {cmd}\n")
-            if '""' in cmd:
-                self._append_hydra_log_threadsafe("[WARN] Double quote pair detected; continuing\n")
-            if '^^' in cmd:
-                self._append_hydra_log_threadsafe("[WARN] Double caret detected after cleanup; continuing\n")
-            self._append_hydra_log_threadsafe(f"[ESCAPED CMD] {cmd}\n")
             self._append_hydra_log_threadsafe(f"[EXECUTING FINAL] {cmd}\n")
-            if "-L" in cmd or "-P" in cmd:
-                self._append_hydra_log_threadsafe("[FATAL] Old flags still present after cleanup; skipping\n")
+
+            # Validation - continue even with minor issues
+            if "\\1" in cmd:
+                self._append_hydra_log_threadsafe("[WARN] \\1 detected (regex failure); skipping\n")
                 self._set_row_status(site, "Failed")
                 continue
-            if "-C" not in cmd or cmd.count(combo_file) != 1:
-                self._append_hydra_log_threadsafe("[SKIP] Invalid cmd structure\n")
+            if cmd.count(combo_file) != 1 or "-C" not in cmd:
+                self._append_hydra_log_threadsafe("[SKIP] Invalid cmd\n")
                 self._set_row_status(site, "Failed")
                 continue
 
