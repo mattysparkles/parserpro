@@ -436,7 +436,7 @@ def _add_dir_to_path_windows(path_obj: Path) -> dict:
         if target.lower() not in user_path.lower().split(";"):
             ps_cmd = (
                 "$u=[Environment]::GetEnvironmentVariable('Path','User');"
-                f"$p='{target.replace("'", "''")}';"
+                f"$p='{target.replace(chr(39), chr(39) * 2)}';"
                 "if(-not $u){$u=''};"
                 "if(($u -split ';' | ForEach-Object {$_.Trim().ToLowerInvariant()}) -notcontains $p.ToLowerInvariant())"
                 "{[Environment]::SetEnvironmentVariable('Path',($u.TrimEnd(';')+';'+$p).Trim(';'),'User')}"
