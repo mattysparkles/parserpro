@@ -396,30 +396,33 @@ class RunnerMixin:
                 continue
 
             combo_file = str(combo_file_path.resolve())
+            # FIXED: Switched to -C + removed old flags + duplicate cleanup
             combo_file = combo_file.replace("\\", "/")
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            # FIXED: Duplicate arg removal + -C enforcement
             cmd = str(cmd_template)
             cmd = cmd.replace("{{combo_file}}", combo_file)
-            cmd = cmd.replace('-L "{{combo_file}}" -P "{{combo_file}}"', f'-C "{combo_file}"')
-            cmd = cmd.replace('"{combo_file}" "{combo_file}"', f'"{combo_file}"')
-            cmd = cmd.replace('"{combo_file}"', f'"{combo_file}"')
+            cmd = re.sub(r' -L ".+?" -P ".+?"', f' -C "{combo_file}"', cmd)
+            cmd = re.sub(r' -P ""', '', cmd)
+            cmd = re.sub(r'"(.+?.txt)" "\1"', r'"\1"', cmd)
 
-            if "{combo_file}" in cmd:
-                self._append_hydra_log_threadsafe(f"Replacement failed for {site}; skipping command: {cmd}\n")
+            if "-L" in cmd or "-P" in cmd:
+                self._append_hydra_log_threadsafe(f"Old flags detected; skipping {site}. Command: {cmd}\n")
+                self._set_row_status(site, "Failed")
+                continue
+            if cmd.count(combo_file) > 1:
+                self._append_hydra_log_threadsafe(f"Duplicate file arg still present; skipping {site}. Command: {cmd}\n")
+                self._set_row_status(site, "Failed")
+                continue
+            if "-C" not in cmd:
+                self._append_hydra_log_threadsafe(f"Missing -C flag; skipping {site}. Command: {cmd}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            if cmd.count(combo_file) > 1:
-                self._append_hydra_log_threadsafe(f"Duplicate file arg detected for {site}; sanitizing command.\n")
-                first_idx = cmd.find(combo_file)
-                head = cmd[: first_idx + len(combo_file)]
-                tail = cmd[first_idx + len(combo_file):].replace(combo_file, "", 1)
-                cmd = f"{head}{tail}"
+            self.hydra_log.insert(tk.END, f"[CLEANED CMD] {cmd}\n")
 
             intercept_proxy = ""
             if bool(config.get("use_burp", False)):
