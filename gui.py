@@ -8,6 +8,8 @@ import subprocess
 import threading
 import time
 import uuid
+
+import requests
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -19,7 +21,6 @@ from tkinter import filedialog, messagebox, ttk
 from app_logging import logger
 from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
 from extract import extract_login_form, test_credentials_for_site
-from fetch import ensure_chromedriver_available
 from burp import BURP_DOWNLOAD_URL, launch_burp
 from zap import import_data_to_zap, launch_zap
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
@@ -183,19 +184,29 @@ class CombinedParserGUI(RunnerMixin):
                 else:
                     self._write_log_threadsafe(f"Hydra check: {hydra_status.get('message')}")
 
-                ok_driver, driver_msg, _ = ensure_chromedriver_available()
-                if not ok_driver:
-                    issues.append(f"Chromedriver auto-setup issue: {driver_msg}")
+                driver_path = (config.get("chrome_driver_path") or "").strip()
+                if driver_path:
+                    self._write_log_threadsafe(f"Chromedriver check: ready ({driver_path})")
                 else:
-                    self._write_log_threadsafe("Chromedriver check: ready")
+                    issues.append("Chromedriver path not initialized at startup")
 
                 if get_vpn_control(config) == "nordvpn":
                     nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
                     if not nord.get("available"):
                         issues.append("NordVPN CLI missing (install required for vpn_control=nordvpn)")
 
-                if config.get("proxy_url", "").strip() and not get_effective_proxy(config, None):
-                    issues.append("Configured proxy is unreachable; extraction will continue without it")
+                # FIXED: Proxy fallback + single chromedriver check
+                proxy_url = str(config.get("proxy_url", "")).strip()
+                if proxy_url:
+                    proxy_cfg = {"http": proxy_url, "https": proxy_url}
+                    try:
+                        requests.get("https://httpbin.org/ip", proxies=proxy_cfg, timeout=5)
+                        self._write_log_threadsafe("Proxy check: reachable via httpbin")
+                    except Exception as proxy_exc:
+                        config["proxy_url"] = ""
+                        save_config()
+                        issues.append("Configured proxy failed startup health check and was disabled")
+                        self._write_log_threadsafe(f"[Proxy Fallback] Using direct connection ({proxy_exc})")
 
                 if issues:
                     final_status = f"Startup checks finished with {len(issues)} warning(s)."

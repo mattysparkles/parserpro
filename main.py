@@ -15,6 +15,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox
 
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+except ImportError:
+    ChromeDriverManager = None
 
 try:
     from urllib3.exceptions import InsecureRequestWarning
@@ -23,12 +27,45 @@ except ImportError:
 
 from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config
 from extract import extract_login_form
-from fetch import ensure_chromedriver_available
+from fetch import HAS_DEATHBYCAPTCHA
 from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
 from gui import CombinedParserGUI
 
 warnings.simplefilter("ignore", InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+# FIXED: Proxy fallback + single chromedriver check
+_CHROMEDRIVER_BOOTSTRAPPED = False
+
+
+def ensure_chromedriver_once() -> tuple[bool, str]:
+    global _CHROMEDRIVER_BOOTSTRAPPED
+    if _CHROMEDRIVER_BOOTSTRAPPED:
+        return True, "chromedriver already initialized"
+
+    if not bool(config.get("auto_setup_chromedriver", True)):
+        return True, "chromedriver auto-setup disabled"
+
+    if ChromeDriverManager is None:
+        return False, "webdriver_manager_not_installed"
+
+    try:
+        driver_path = ChromeDriverManager().install()
+        config["chrome_driver_path"] = driver_path
+        _CHROMEDRIVER_BOOTSTRAPPED = True
+        logging.info("[Startup] Chromedriver initialized once: %s", driver_path)
+        return True, "chromedriver initialized"
+    except Exception as exc:
+        msg = f"chromedriver setup warning: {exc}"
+        logging.warning("[Startup] %s", msg)
+        return False, msg
+
+
+def log_optional_dbc_status_once() -> None:
+    if HAS_DEATHBYCAPTCHA:
+        logging.info("[Startup] DeathByCaptcha provider available")
+    else:
+        logging.info("[Startup] DeathByCaptcha provider not installed; continuing without DBC")
 
 if sys.platform == "win32":
     try:
@@ -88,7 +125,7 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
     except Exception as exc:
         notes.append(f"webdriver_manager not available: {exc}. Install via `pip install webdriver-manager selenium`.")
 
-    chromedriver_ok, chromedriver_msg, _ = ensure_chromedriver_available()
+    chromedriver_ok, chromedriver_msg = ensure_chromedriver_once()
     if chromedriver_ok:
         _log_note(notes, "Chromedriver check passed.", logger)
     else:
@@ -237,6 +274,9 @@ def _schedule_gui_startup_checks(root: tk.Tk) -> None:
 
 
 def main() -> None:
+    log_optional_dbc_status_once()
+    ensure_chromedriver_once()
+
     parser = argparse.ArgumentParser(description="ParserPro GUI/headless runner")
     parser.add_argument("--extract", help="Path to combo input file")
     parser.add_argument("--forms-output", help="Output path for extracted forms CSV")
