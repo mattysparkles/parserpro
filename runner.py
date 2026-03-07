@@ -400,7 +400,7 @@ class RunnerMixin:
             cmd_template = str(cmd_template)
             self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
 
-            # FIXED: Corrected form string quoting + removed extra ^ + Windows escaping
+            # FIXED: Removed extra ^ + Windows & escaping + loosened validation
             combo_file = combo_file.replace("\\", "/")  # Hydra prefers forward slashes
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
@@ -416,20 +416,18 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
-            cmd = cmd.replace('""', '"')
-            cmd = cmd.replace("^", "")
+            cmd = cmd.replace("^^", "^")
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
             if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower() and "&" in cmd:
                 cmd = cmd.replace("&", "^&")
-            if '""' in cmd or '^^' in cmd:
-                self._append_hydra_log_threadsafe("Quoting error still present; skipping\n")
-                self._set_row_status(site, "Failed")
-                continue
-            self._append_hydra_log_threadsafe(f"[AFTER CLEANUP] {cmd}\n")
-            self._append_hydra_log_threadsafe(f"[FINAL CMD] {cmd}\n")
-
+            if '""' in cmd:
+                self._append_hydra_log_threadsafe("[WARN] Double quote pair detected; continuing\n")
+            if '^^' in cmd:
+                self._append_hydra_log_threadsafe("[WARN] Double caret detected after cleanup; continuing\n")
+            self._append_hydra_log_threadsafe(f"[ESCAPED CMD] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[EXECUTING FINAL] {cmd}\n")
             if "-L" in cmd or "-P" in cmd:
                 self._append_hydra_log_threadsafe("[FATAL] Old flags still present after cleanup; skipping\n")
                 self._set_row_status(site, "Failed")

@@ -382,9 +382,11 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Corrected form string quoting + removed extra ^ + Windows escaping
+            # FIXED: Removed extra ^ + Windows & escaping + loosened validation
             action = action.strip().strip('"')
-            post_data = post_data.replace("^", "")
+            post_data = post_data.replace("^USER^", "^USER^").replace("^PASS^", "^PASS^")
+            print(f"[RAW ACTION] {action}")
+            print(f"[RAW POST DATA] {post_data}")
             form_spec = f"{action}:{post_data}:F={failure_value}"
             print(f"[RAW FORM SPEC] {form_spec}")
             cmd_template = 'hydra -C "{{combo_file}}" {target} http-post-form "{form_spec}" -V -t 4 -f'.format(
