@@ -382,8 +382,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Enforced -C template, removed -L/-P forever
-            cmd_template = f'hydra -C "{{{{combo_file}}}}" {target} http-post-form "{action}:{post_data}:F={failure_value}" -V -t 4 -f'
+            # FIXED: Quoted target + form escaping for Windows
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" http-post-form "{action}:{post_data}:F={failure_value}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
             custom_tester_required = True
