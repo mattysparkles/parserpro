@@ -388,27 +388,39 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
+            combo_file = get_site_filename(site)
             combo_file_path = self._resolve_combo_file_path(site)
             if not combo_file_path.exists():
-                self._append_hydra_log_threadsafe(f"[ERROR] Combo file missing for {site}: {combo_file_path}\n")
+                self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file_path}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
             combo_file = str(combo_file_path.resolve())
-
-            # FIXED: Force Hydra combined-credential mode and replace all supported combo placeholders.
-            cmd = str(cmd_template)
-            cmd = cmd.replace("{{combo_file}}", combo_file)
-            cmd = cmd.replace("{combo_file}", combo_file)
-            cmd = cmd.replace(" -L ", " -C ").replace(" -P ", " ")
-
-            # FIXED: Defensive guard for unresolved placeholder variants.
-            if "{{combo_file}}" in cmd or "{combo_file}" in cmd:
-                self._append_hydra_log_threadsafe(
-                    f"[WARN] Combo placeholder unresolved for {site}; skipping command: {cmd}\n"
-                )
+            combo_file = combo_file.replace("\\", "/")
+            if not Path(combo_file).exists():
+                self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
+
+            # FIXED: Duplicate arg removal + -C enforcement
+            cmd = str(cmd_template)
+            cmd = cmd.replace("{{combo_file}}", combo_file)
+            cmd = cmd.replace('-L "{{combo_file}}" -P "{{combo_file}}"', f'-C "{combo_file}"')
+            cmd = cmd.replace('"{combo_file}" "{combo_file}"', f'"{combo_file}"')
+            cmd = cmd.replace('"{combo_file}"', f'"{combo_file}"')
+
+            if "{combo_file}" in cmd:
+                self._append_hydra_log_threadsafe(f"Replacement failed for {site}; skipping command: {cmd}\n")
+                self._set_row_status(site, "Failed")
+                continue
+
+            if cmd.count(combo_file) > 1:
+                self._append_hydra_log_threadsafe(f"Duplicate file arg detected for {site}; sanitizing command.\n")
+                first_idx = cmd.find(combo_file)
+                head = cmd[: first_idx + len(combo_file)]
+                tail = cmd[first_idx + len(combo_file):].replace(combo_file, "", 1)
+                cmd = f"{head}{tail}"
+
             intercept_proxy = ""
             if bool(config.get("use_burp", False)):
                 intercept_proxy = config.get("burp_proxy", "").strip()
@@ -430,6 +442,8 @@ class RunnerMixin:
                 self._append_hydra_log_threadsafe(f"[Using WSL {config.get('wsl_hydra_distro')}] {cmd}\n")
             else:
                 self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[VALIDATED CMD] {cmd}\n")
+            self.hydra_log.insert(tk.END, f"[VALIDATED CMD] {cmd}\n")
             # FIXED: Log the final command after all replacements for debugging/auditing.
             self._append_hydra_log_threadsafe(f"[DEBUG FINAL CMD] {cmd}\n")
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
