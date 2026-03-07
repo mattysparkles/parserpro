@@ -405,6 +405,11 @@ class RunnerMixin:
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
 
+            # Clean nested quotes around the form spec
+            cmd = re.sub(r'http-post-form ""(.*?)""', r'http-post-form "\\1"', cmd)
+            cmd = re.sub(r'http-post-form "(.*?)"', r'http-post-form "\\1"', cmd)
+            self._append_hydra_log_threadsafe(f"[AFTER QUOTE CLEAN] {cmd}\n")
+
             form_spec = ""
             match = re.search(r'http-post-form\s+"([^"]+)"', cmd)
             if match:
@@ -416,12 +421,13 @@ class RunnerMixin:
                 self._set_row_status(site, "Failed")
                 continue
 
-            cmd = cmd.replace("^^", "^")
+            cmd = re.sub(r'\^{2,}', '^', cmd)
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
             if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower() and "&" in cmd:
                 cmd = cmd.replace("&", "^&")
+            self._append_hydra_log_threadsafe(f"[AFTER ESCAPE] {cmd}\n")
             if '""' in cmd:
                 self._append_hydra_log_threadsafe("[WARN] Double quote pair detected; continuing\n")
             if '^^' in cmd:
@@ -432,12 +438,8 @@ class RunnerMixin:
                 self._append_hydra_log_threadsafe("[FATAL] Old flags still present after cleanup; skipping\n")
                 self._set_row_status(site, "Failed")
                 continue
-            if cmd.count(combo_file) != 1:
-                self._append_hydra_log_threadsafe("[FATAL] Wrong number of file args; skipping\n")
-                self._set_row_status(site, "Failed")
-                continue
-            if "-C" not in cmd:
-                self._append_hydra_log_threadsafe("[FATAL] Missing -C flag; skipping\n")
+            if "-C" not in cmd or cmd.count(combo_file) != 1:
+                self._append_hydra_log_threadsafe("[SKIP] Invalid cmd structure\n")
                 self._set_row_status(site, "Failed")
                 continue
 
