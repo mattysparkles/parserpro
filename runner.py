@@ -396,33 +396,36 @@ class RunnerMixin:
                 continue
 
             combo_file = str(combo_file_path.resolve())
-            # FIXED: Switched to -C + removed old flags + duplicate cleanup
+            # FIXED: Enforced -C + multi-stage logging + cleanup
             combo_file = combo_file.replace("\\", "/")
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            cmd = str(cmd_template)
-            cmd = cmd.replace("{{combo_file}}", combo_file)
+            cmd_template = str(cmd_template)
+            self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
+
+            cmd = cmd_template.replace("{{combo_file}}", combo_file)
+            self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
+
             cmd = re.sub(r' -L ".+?" -P ".+?"', f' -C "{combo_file}"', cmd)
             cmd = re.sub(r' -P ""', '', cmd)
-            cmd = re.sub(r'"(.+?.txt)" "\1"', r'"\1"', cmd)
+            cmd = re.sub(r'"{combo_file}" "{combo_file}"', f'"{combo_file}"', cmd)
+            self._append_hydra_log_threadsafe(f"[AFTER CLEANUP] {cmd}\n")
 
             if "-L" in cmd or "-P" in cmd:
-                self._append_hydra_log_threadsafe(f"Old flags detected; skipping {site}. Command: {cmd}\n")
+                self._append_hydra_log_threadsafe("[FATAL] Old flags still present after cleanup; skipping\n")
                 self._set_row_status(site, "Failed")
                 continue
-            if cmd.count(combo_file) > 1:
-                self._append_hydra_log_threadsafe(f"Duplicate file arg still present; skipping {site}. Command: {cmd}\n")
+            if cmd.count(combo_file) != 1:
+                self._append_hydra_log_threadsafe("[FATAL] Wrong number of file args; skipping\n")
                 self._set_row_status(site, "Failed")
                 continue
             if "-C" not in cmd:
-                self._append_hydra_log_threadsafe(f"Missing -C flag; skipping {site}. Command: {cmd}\n")
+                self._append_hydra_log_threadsafe("[FATAL] Missing -C flag; skipping\n")
                 self._set_row_status(site, "Failed")
                 continue
-
-            self.hydra_log.insert(tk.END, f"[CLEANED CMD] {cmd}\n")
 
             intercept_proxy = ""
             if bool(config.get("use_burp", False)):
@@ -447,8 +450,7 @@ class RunnerMixin:
                 self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
             self._append_hydra_log_threadsafe(f"[VALIDATED CMD] {cmd}\n")
             self.hydra_log.insert(tk.END, f"[VALIDATED CMD] {cmd}\n")
-            # FIXED: Log the final command after all replacements for debugging/auditing.
-            self._append_hydra_log_threadsafe(f"[DEBUG FINAL CMD] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[EXECUTING] {cmd}\n")
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
 
             try:
