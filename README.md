@@ -1,371 +1,519 @@
-# ParserPro (Ultimate Combo → Hydra Pipeline)
+# ParserPro
 
-ParserPro is a modular Python toolkit that ingests combo lists, normalizes/organizes credentials by target site, extracts login form metadata, and prepares Hydra command templates for downstream credential testing workflows.
+ParserPro is a desktop + CLI workflow tool for **credential-list normalization**, **login-form extraction**, and **Hydra command preparation/execution**.
 
-> ⚠️ Use only on systems and applications you own or are explicitly authorized to test.
+> ⚠️ **Legal/Ethical Use Only:** Use ParserPro only on systems you own or where you have explicit written authorization to test.
 
-## What it does
+---
 
-- Parses one or many `.txt` combo sources with `site:user:pass` formatted lines.
-- Produces a consolidated CSV output for data hygiene and auditing.
-- Creates per-site combo files (`example_com.txt`) for replay/testing.
-- Extracts login form details from target pages (Playwright first, Selenium fallback).
-- Skips invalid/non-web targets before browser navigation (including nonstandard ports unless explicitly allowed).
-- Builds Hydra `http-post-form` command templates from discovered forms.
-- Includes a GUI with two tabs:
-  - **Extractor**: import combos, normalize sites, extract forms.
-  - **Hydra Runner**: run selected or all prepared targets.
-- Supports optional:
-  - `vpn_control` (`none` by default, optional `nordvpn`) for VPN automation mode selection.
-  - `proxy_url` routing for an already-running SOCKS/HTTP proxy.
-  - Burp proxy routing for extraction and runner command composition.
-  - CAPTCHA solving integration (DeathByCaptcha / 2Captcha / Anti-Captcha / Capsolver).
-  - Proxy-list rotation (`proxies.txt`) for extraction and runner execution.
-  - Headless CLI mode (`--headless`) for extraction + optional hydra execution.
+## Table of Contents
 
-## Project structure
+1. [What ParserPro Does](#what-parserpro-does)
+2. [Feature Inventory (Detailed)](#feature-inventory-detailed)
+3. [Project Layout](#project-layout)
+4. [Requirements](#requirements)
+5. [Quick Start for Newbies](#quick-start-for-newbies)
+6. [First Run Walkthrough (GUI)](#first-run-walkthrough-gui)
+7. [Headless/CLI Usage](#headlesscli-usage)
+8. [Input/Output Formats](#inputoutput-formats)
+9. [Settings Reference (Every Option)](#settings-reference-every-option)
+10. [Hydra Integration Details](#hydra-integration-details)
+11. [Proxy, Burp, and ZAP Workflows](#proxy-burp-and-zap-workflows)
+12. [Troubleshooting Guide](#troubleshooting-guide)
+13. [Testing / Smoke Checks](#testing--smoke-checks)
+14. [Safety, Data Handling, and Privacy Notes](#safety-data-handling-and-privacy-notes)
+15. [Developer Notes](#developer-notes)
 
-- `main.py` – app entry point and Tk bootstrap.
-- `gui.py` – primary GUI and orchestration pipeline.
-- `runner.py` – Hydra runner mixin and execution UI/actions.
-- `extract.py` – form detection/validation/extraction logic.
-- `fetch.py` – page fetching backends + CAPTCHA hooks.
-- `helpers.py` – URL parsing and misc shared helpers.
-- `config.py` – config persistence and gost downloader.
-- `parserpro8.py` – legacy single-file script (kept for transition/reference).
+---
 
-## Installation
+## What ParserPro Does
+
+At a high level, ParserPro turns raw combo lists into structured, testable artifacts:
+
+1. Reads combo lines in `site:user:password` format.
+2. Normalizes target sites/URLs.
+3. Groups credentials by site and writes per-site combo files.
+4. Visits targets and attempts login-form extraction.
+5. Classifies extraction outcomes (actionable form, login-ish page, no form, fetch failure).
+6. Generates Hydra command templates per target.
+7. Lets you run Hydra from the GUI runner or from headless mode.
+8. Records logs, timeline events, and run summaries for diagnostics/export.
+
+---
+
+## Feature Inventory (Detailed)
+
+This section explicitly lists major features available in the codebase.
+
+### 1) Combo ingestion and normalization
+
+- Accepts a single input file or a folder of `.txt` files.
+- Parses lines into three fields (`site`, `username`, `password`).
+- Optional cleanup controls:
+  - skip blank lines
+  - trim whitespace
+- Normalizes site hostnames/URLs and computes base URLs.
+- Exports consolidated CSV plus per-site combo files (`data/<site>.txt`).
+
+### 2) Extraction pipeline
+
+- Optional login-form extraction per target.
+- Uses fetch/extract modules to identify likely user/pass fields.
+- Supports strict validation mode.
+- Supports cache/TTL logic to skip fresh already-processed sites.
+- Supports force recheck override.
+- Supports a configurable analysis mode (`static` / `observation`).
+- Captures validation reason, confidence, method, warnings, and failure metadata.
+
+### 3) Hydra command generation
+
+- Produces a `hydra_forms.csv` containing discovered form metadata.
+- Builds command templates for:
+  - `http-post-form` when method is POST
+  - `http-get-form` when method is GET
+- Emits method warnings for GET forms (manual tuning may be needed).
+- Stores runnable command templates with combo placeholder replacement.
+
+### 4) Hydra runner UI (command orchestrator)
+
+- Dedicated **Hydra Runner** tab with table + log pane.
+- Row selection with checkbox column (`[ ]` / `[x]`).
+- Selection helpers:
+  - Select All (Filtered)
+  - Deselect All (Filtered)
+  - Invert Selection (Filtered)
+- Run modes:
+  - Run Selected
+  - Run All (Filtered)
+- Filters:
+  - minimum combos
+  - status (All/Pending/Running/Failed/Success)
+  - minimum hits
+  - last run state (All/Never Run/Has Run)
+- Sorting by table headers (numeric and text aware).
+- Pause/resume and cancel controls.
+- Timeout/cleanup support for running subprocesses.
+
+### 5) Startup dependency checks and auto-setup
+
+- Startup checks for Hydra availability.
+- Chromedriver auto-setup (via `webdriver_manager`) when enabled.
+- NordVPN CLI presence check.
+- On Windows, Hydra setup path includes:
+  - native hydra detection
+  - WSL distro probing and hydra validation
+  - optional install path attempts (if enabled)
+  - native fallback download/extract path attempts
+- Runner can be disabled with clear warning if Hydra remains unavailable.
+
+### 6) Proxy, VPN, and routing controls
+
+- Supports `proxy_url` usage with reachability checks.
+- `proxy_required` can fail-fast when proxy is unavailable.
+- Optional proxy rotation from a proxy list file.
+- Burp routing support (`use_burp`, `burp_proxy`).
+- ZAP routing support (`use_zap`, `zap_proxy`, optional API key).
+- Intercept-proxy precedence logic (Burp first when enabled).
+- VPN mode setting (`none` or `nordvpn`).
+
+### 7) CAPTCHA provider integration
+
+Supports provider keys/order settings for:
+- DeathByCaptcha
+- 2Captcha
+- Anti-Captcha
+- Capsolver
+
+Provider availability is optional and degrades gracefully if missing.
+
+### 8) Burp and ZAP tooling helpers
+
+- Burp executable auto-detection + launch helper.
+- ZAP executable auto-detection + launch helper (desktop or daemon).
+- Export/import helper flows for target data.
+
+### 9) Timeline, run summaries, and diagnostics
+
+- Timeline event recording with categories, levels, actions, metrics.
+- Timeline filtering and CSV export.
+- Run summary generation with metrics, error category counts, latency stats.
+- Troubleshooting panel groups fetch failures by category:
+  - DNS
+  - TLS
+  - proxy
+  - connection closed
+  - other
+- Diagnostic exports (CSV/JSON).
+
+### 10) Project/session management
+
+- New/Open/Save project support.
+- Autosave worker + periodic autosave controls.
+- Export reports as JSON/CSV.
+- Maintains processed-site metadata and app settings snapshot.
+
+### 11) Logging and output organization
+
+- Timestamped logs under `logs/`.
+- Hit files under `hits/` and `data/hits_<site>.txt`.
+- Config and processed-site state under `data/`.
+
+---
+
+## Project Layout
+
+- `main.py` - app entry point and CLI/headless argument handling.
+- `gui.py` - main multi-tab Tkinter interface and extraction orchestration.
+- `runner.py` - Hydra runner tab behaviors and execution controls.
+- `extract.py` - form extraction logic.
+- `fetch.py` - page fetch helpers and provider hooks.
+- `helpers.py` - parsing/url helper utilities.
+- `config.py` - config loading/defaults + environment/dependency setup.
+- `burp.py` - Burp launcher and helpers.
+- `zap.py` - ZAP launcher/import helpers.
+- `proxies.py` - proxy rotation utility.
+- `timeline.py` - timeline event model and utilities.
+- `run_summary.py` - run summary model and metric computation.
+- `project_io.py` - project/report export/import helpers.
+- `tests/` - unit tests.
+
+---
+
+## Requirements
+
+- Python 3.10+
+- `pip`
+- OS with GUI support for Tkinter (for desktop mode)
+- Optional but recommended:
+  - Playwright Chromium
+  - Selenium dependencies / Chromedriver
+  - Hydra
+  - Burp Suite / OWASP ZAP
+
+Install Python dependencies:
 
 ```bash
+pip install -r requirements.txt
+```
+
+Install Playwright browser:
+
+```bash
+python -m playwright install chromium
+```
+
+---
+
+## Quick Start for Newbies
+
+If you are brand new, follow this exactly.
+
+### Step 1) Clone and enter project
+
+```bash
+git clone <your-repo-url> parserpro
+cd parserpro
+```
+
+### Step 2) Create virtual environment
+
+**Linux/macOS**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows (PowerShell)**
+```powershell
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+.venv\Scripts\Activate.ps1
+```
+
+### Step 3) Install dependencies
+
+```bash
 pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-Then launch:
+### Step 4) Prepare input file
+
+Create a text file (example `combos.txt`) with one item per line:
+
+```text
+example.com:alice@example.com:Password123
+https://demo.site/login:bob:SuperSecret!
+```
+
+### Step 5) Start app
 
 ```bash
 python main.py
+```
 
-# headless mode
+### Step 6) Configure output paths in Extractor tab
+
+- Choose input file/folder
+- Choose combined CSV output path
+- Choose forms CSV output path (`hydra_forms.csv` style)
+
+### Step 7) Run pipeline
+
+Click **Start Pipeline**.
+
+After completion, inspect:
+- output CSV
+- forms CSV
+- `data/*.txt` per-site combo files
+- `logs/` for details
+
+---
+
+## First Run Walkthrough (GUI)
+
+### Extractor tab
+
+1. **Input section**
+   - `File` for one combo file
+   - `Folder` for bulk import of `.txt` files
+2. **Output section**
+   - Combined CSV path
+   - Forms CSV path
+3. **Options**
+   - Skip blank lines
+   - Trim whitespace
+   - Create per-site `user:pass` files
+   - Extract login forms
+   - Strict form validation
+   - Force recheck (ignore cache)
+   - Show debug details
+4. **Control buttons**
+   - Start Pipeline
+   - Pause
+   - Cancel
+   - Resume Failed
+   - Settings
+   - Test Credentials (Selected Site)
+   - Clear Log
+
+### Hydra Runner tab
+
+- Click **Refresh List** after extraction.
+- Select rows using the checkbox column.
+- Use filters (combos/status/hits/last run).
+- Use **Run Selected** or **Run All (Filtered)**.
+- Observe live command output in runner log area.
+
+### Burp Tester tab
+
+Use this tab when you want routing through Burp and helper launch/import flows.
+
+### ZAP Tester tab
+
+Use this tab to integrate with OWASP ZAP (desktop/daemon depending on settings).
+
+### Troubleshooting tab
+
+Use this tab for categorized fetch-failure diagnostics and exports.
+
+### Timeline tab
+
+Use this tab to inspect event stream, filter by level/category/window, compare runs, and export timeline CSV.
+
+---
+
+## Headless/CLI Usage
+
+ParserPro supports non-GUI mode.
+
+### Command
+
+```bash
+python main.py --headless --extract <input.txt> --forms-output <forms.csv> [--run-hydra]
+```
+
+### Arguments
+
+- `--headless` : run without GUI
+- `--extract` : input combo file path
+- `--forms-output` : where to write extracted forms CSV
+- `--run-hydra` : optionally execute hydra after extraction
+
+### Example
+
+```bash
 python main.py --headless --extract combos.txt --forms-output hydra_forms.csv --run-hydra
 ```
 
-## Optional dependencies
+> `--headless` requires both `--extract` and `--forms-output`.
 
-### Optional: DeathByCaptcha
+---
 
-DeathByCaptcha support is optional and now degrades gracefully when the package or client class is unavailable.
+## Input/Output Formats
 
-```bash
-pip install deathbycaptcha
+### Expected input line format
+
+```text
+site:user:password
 ```
 
-If your environment exposes `HttpClient` but not `SocketClient`, ParserPro now falls back automatically.
+Where `site` can be domain or URL.
 
-### Optional: Proxy / VPN behavior
+### Key generated files
 
-ParserPro now defaults to `vpn_control: "none"` so it does **not** attempt NordVPN automation unless you explicitly opt in.
+- `data/config.json` - persisted settings
+- `data/processed_sites.json` - cached per-site processing state
+- `data/<site>.txt` - per-site combo files
+- `data/hits_<site>.txt` - runner hit captures
+- `hits/hits_<domain>.txt` - saved successful hit summaries
+- `logs/*.log` - app/run logs
+- `combined.csv` (user-defined name/path)
+- `hydra_forms.csv` (user-defined name/path)
 
-On Windows specifically, ParserPro will not launch the NordVPN GUI executable. If a true headless CLI with connect/disconnect support is not available, it logs: `NordVPN automation not supported on Windows; set vpn_control='none' and manage VPN externally.` and continues with no VPN/no proxy automation.
+---
 
-If `proxy_url` is set, ParserPro only uses it when reachable. If unreachable and `proxy_required` is `false`, it logs once and disables proxy for the run. If `proxy_required` is `true`, it fails fast.
+## Settings Reference (Every Option)
 
-When NordVPN mode is enabled and supported, ParserPro auto-detects the latest compatible gost release asset for your OS/CPU via GitHub Releases API and caches the archive under `data/downloads/`.
+These are the core persisted config options exposed in settings/defaults.
 
-### System tools
+- `ignore_https_errors` - allow HTTPS/TLS errors during fetch attempts.
+- `vpn_control` - VPN automation mode (`none`, `nordvpn`).
+- `proxy_url` - default proxy endpoint.
+- `proxy_required` - fail-fast if configured proxy is unreachable.
+- `use_burp` - route traffic via Burp proxy setting.
+- `burp_proxy` - Burp proxy URL.
+- `use_zap` - route traffic via ZAP proxy setting.
+- `zap_proxy` - ZAP proxy URL.
+- `zap_api_key` - optional ZAP API key.
+- `auto_start_zap_daemon` - launch ZAP in daemon mode automatically.
+- `proxy_rotation` - enable rotating proxies from list.
+- `proxy_list_file` - file path with one proxy endpoint per line.
+- `anticaptcha_key` - Anti-Captcha API key.
+- `capsolver_key` - Capsolver API key.
+- `captcha_provider_order` - provider fallback order list.
+- `allow_nonstandard_ports` - permit non-default web ports.
+- `force_recheck` - ignore cache freshness and retry extraction.
+- `cache_ttl_days` - freshness window for successful cache entries.
+- `failed_retry_ttl_days` - freshness window for failed entries.
+- `debug_logging` - verbose log output.
+- `analysis_mode` - `static` or `observation` extraction mode.
+- `observation_enable_dummy_interaction` - allow basic interaction during observation mode.
+- `observation_allowlisted_domains` - domains allowed for observation interactions.
+- `startup_dependency_checks` - run startup dependency checks.
+- `prefer_wsl_hydra` - prefer WSL hydra backend when available.
+- `auto_install_hydra` - attempt auto install when Hydra missing.
+- `hydra_timeout_seconds` - runner timeout per Hydra process.
+- `wsl_username` - optional WSL user for install/commands.
+- `wsl_password` - optional password for sudo install flow.
+- `auto_setup_chromedriver` - install/setup chromedriver automatically.
+- `auto_configure_nordvpn_path` - auto-detect/configure NordVPN path.
 
-Depending on enabled features you may also need:
+---
 
-- `hydra` (for runner execution)
-- `nordvpn` CLI (if using auto NordVPN rotation)
-- Chromium/Chrome runtime compatible with Playwright/Selenium
+## Hydra Integration Details
 
+ParserPro can use native Hydra or WSL Hydra (especially on Windows).
 
+Behavior overview:
 
-## UI refresh (2026 usability pass)
+1. Detect existing hydra.
+2. If unavailable, attempt supported install/setup workflows.
+3. Store backend mode and distro metadata when found.
+4. If still unavailable, runner remains disabled but extractor still works.
 
-- Added vertical + horizontal scrollbars to long-content widgets in both tabs:
-  - Extractor log
-  - Runner results table
-  - Runner log
-- Mouse wheel scrolling now supports platform-specific behavior, including `Shift+Wheel` for horizontal scrolling.
-- Runner tab now uses an adjustable split pane so you can resize table/log space interactively.
-- Layout was updated for better resizing at common laptop resolutions (including 1280x720).
+Hydra commands are generated from extracted form metadata and combo file placeholders.
 
-**Resize tips**
-- Drag the divider in the Runner tab to allocate more room to the results table or the runner log.
-- Widen the app window to view more Treeview columns; use the horizontal scrollbar for overflow.
+---
 
-## Runner tab UX controls
+## Proxy, Burp, and ZAP Workflows
 
-The **Hydra Runner** tab now behaves like a generic command orchestrator with explicit row controls:
+### Basic proxy routing
 
-- **Pause / Resume / Cancel semantics**
-  - **Pause** stops launching new subprocesses and waits cooperatively (no busy-spin loops).
-  - **Cancel** stops queued launches immediately and terminates any active subprocess (`terminate` then `kill` fallback).
-  - UI state returns to idle after worker completion through queue-driven main-thread updates.
-- **Sorting**
-  - Click any table header (`Combos`, `Status`, `Site`, `Hits`, `Last Run`) to toggle ascending/descending sorting.
-  - Numeric columns are sorted numerically; text columns are case-insensitive.
-- **Filtering**
-  - Minimum combos
-  - Status (`All / Pending / Running / Failed / Success`)
-  - Minimum hits
-  - Last run (`All / Never Run / Has Run`)
-- **Selection model**
-  - First column checkbox (`[ ]` / `[x]`) persists selection through sort/filter refreshes.
-  - Buttons: **Select All (Filtered)**, **Deselect All (Filtered)**, **Invert Selection (Filtered)**.
-  - **Run Selected** executes only rows currently marked selected.
+- Set `proxy_url` in Settings.
+- If `proxy_required = false`, unreachable proxy is logged and bypassed.
+- If `proxy_required = true`, run fails fast on proxy failure.
 
-## Smoke check
+### Proxy rotation
+
+1. Create `proxies.txt`:
+   ```text
+   http://127.0.0.1:8080
+   socks5://127.0.0.1:9050
+   ```
+2. Enable `proxy_rotation`.
+3. Set `proxy_list_file` to this path.
+
+### Burp
+
+- Enable `use_burp` and set `burp_proxy`.
+- Launch Burp manually or via helper action.
+- Install Burp CA cert if intercepting HTTPS.
+
+### ZAP
+
+- Enable `use_zap` and configure `zap_proxy` / `zap_api_key`.
+- Optionally use daemon mode for API workflows.
+
+---
+
+## Troubleshooting Guide
+
+### Problem: Hydra runner disabled
+
+- Run extractor mode anyway (data prep still works).
+- Install hydra manually and restart app.
+- On Windows, ensure WSL is installed/configured if using WSL path.
+
+### Problem: No forms extracted
+
+- Confirm target URL is valid and reachable.
+- Disable strict validation temporarily.
+- Enable debug logging.
+- Try observation mode on JS-heavy pages.
+
+### Problem: Proxy failures
+
+- Verify proxy host/port is reachable.
+- Set `proxy_required=false` to continue without proxy.
+- If using Burp/ZAP, confirm listener is active.
+
+### Problem: TLS/certificate errors
+
+- Install trusted cert chains for intercept proxies.
+- As a last resort for controlled testing only, set `ignore_https_errors=true`.
+
+### Problem: Empty runner hits
+
+- Verify generated command templates are valid for target form behavior.
+- Review method warnings for GET forms.
+- Tune failure/success conditions in templates if needed.
+
+---
+
+## Testing / Smoke Checks
+
+Run these from repository root:
 
 ```bash
 python -m compileall .
-python -m unittest tests.test_url_validation
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-## How the pipeline works
+---
 
-1. **Load input** (single file or folder of `.txt` files).
-2. **Parse and clean lines** (`split_three_fields`, whitespace handling).
-3. **Normalize targets** (`normalize_site` + `get_base_url`).
-4. **Write outputs**:
-   - Combined CSV
-   - Per-site combo files
-5. **Extract forms** (optional):
-   - Fetch page (Playwright, then Selenium fallback)
-   - Validate candidate forms (`POST`, password field, confidence checks)
-   - Build `hydra_command_template`
-6. **Persist state** in `processed_sites.json` for retries/runner list.
-7. **Run Hydra** from Runner tab on selected/all sites.
+## Safety, Data Handling, and Privacy Notes
 
-## Login flow analyzer modes
+- This tool handles highly sensitive credential data.
+- Keep all generated files in secure storage.
+- Rotate/delete old logs and hit files regularly.
+- Never run against unauthorized targets.
+- Follow organizational policy and local laws.
 
-ParserPro now supports two safety-focused analysis modes:
+---
 
-- **Static mode** (default): parse HTML and classify outcomes as:
-  - `✅ actionable native POST form`
-  - `🟨 login-ish (JS-handled / non-POST / missing action)`
-  - `❌ no login form`
-- **Observation mode** (optional): loads target page with Playwright and records observed auth-like requests/cookies as telemetry (`observed_login_flow`).
+## Developer Notes
 
-Observation mode keeps boundaries explicit:
-- Dummy interaction is **off by default**.
-- Dummy interaction only runs when explicitly enabled **and** the domain matches `observation_allowlisted_domains`.
-- Captured data is stored as observed flow metadata (endpoint/method/content-type/status + cookies), not attack instructions.
+- Codebase is modularized by responsibility.
+- Unit tests exist for validation and utility behavior.
+- `parserpro8.py` is retained for legacy/reference context.
 
-Configuration keys in `data/config.json`:
-- `analysis_mode`: `"static"` or `"observation"`
-- `observation_enable_dummy_interaction`: `true/false`
-- `observation_allowlisted_domains`: `["example.com"]`
-
-## Settings
-
-GUI Settings includes:
-
-- DeathByCaptcha username/password
-- 2Captcha API key
-- Anti-Captcha API key
-- Capsolver API key
-- NordVPN token
-- VPN control (`none` or `nordvpn`)
-- Proxy URL (`proxy_url`, optional socks5/http endpoint)
-- Proxy required (`proxy_required`, fail fast if proxy is unreachable)
-- Allow nonstandard ports (`allow_nonstandard_ports`, default `false`)
-- Cache TTL days (`cache_ttl_days`, default `30`)
-- Failed-fetch retry TTL days (`failed_retry_ttl_days`, default `1`)
-- Force recheck toggle (`force_recheck`, default `false`)
-- Burp Proxy (example: `http://127.0.0.1:8080`)
-- Route all requests through Burp (`use_burp`)
-- Enable proxy rotation + proxy list file (`proxy_rotation`, `proxy_list_file`)
-- `ignore_https_errors` in `data/config.json` (default `false`)
-
-When Burp proxy is configured, extraction fetchers are routed through it and runner command composition appends proxy args.
-
-## Burp integration notes
-
-- Start Burp and ensure proxy listener is active.
-- Set `Burp Proxy` in Settings.
-- If inspecting HTTPS traffic, install Burp CA certificate in the system/browser context used by your tooling.
-- For Python HTTPS clients, add Burp CA to your cert bundle (or set `REQUESTS_CA_BUNDLE=/path/to/cacert.pem`).
-- Playwright/Selenium traffic is proxied when **Route all requests through Burp** is enabled.
-- Hydra commands also append `-p <burp_proxy>` when Burp routing is enabled.
-
-
-### Windows recommendation
-
-NordVPN GUI on Windows may steal foreground focus. To avoid disruptions, ParserPro does not control NordVPN by default.
-
-Recommended setup:
-- Connect NordVPN manually at the OS level, then run ParserPro with `vpn_control: "none"`.
-- Or run your own SOCKS/HTTP proxy separately and set `proxy_url` to that listener.
-
-## Common outputs
-
-- `combined.csv` (name user-defined)
-- `hydra_forms.csv` (name user-defined)
-- `data/<site>.txt` per-site combos
-- `data/hits_<site>.txt` runner output hits
-- `hits/<domain>.txt` normalized hit output with timestamps
-- `logs/*.log` timestamped extraction / runner / headless session logs
-- `data/processed_sites.json` run metadata
-- `data/config.json` settings
-
-## CHANGELOG
-
-- Fixed gost download logic to use GitHub Releases API asset metadata per-platform and cache archives under `data/downloads/`; failures now gracefully continue with no proxy.
-- Updated Selenium initialization for Selenium 4 (`service` + `options`) and improved missing-driver error messaging.
-- Made DeathByCaptcha integration optional and client-compatible (`SocketClient` fallback to `HttpClient`).
-- Added URL validation guardrails before browser fetchers to reject non-URL garbage and avoid runtime crashes.
-- Improved form action normalization (`blank -> same page`, relative -> `urljoin`, invalid action skipped with reason).
-- Added optional `ignore_https_errors` config (default `false`) and better TLS/proxy diagnostics.
-- Added tests for URL validation and form action normalization plus documented smoke checks.
-
-## Notes on modularization
-
-This repository is now split by responsibility (GUI, fetch, extract, config, runner, helpers), which reduces coupling and makes testing/evolution easier.
-
-Suggested next improvements:
-
-- Add automated tests under `tests/` (`pytest`) for helper parsing and form validation.
-- Add CI lint/test workflow.
-- Migrate modules into a package directory (`src/parserpro/`) if distribution is planned.
-
-
-
-## Auto-setup and runtime safety (new)
-
-- **Hydra auto-detection/install**: `main.py` runs startup checks before GUI/headless flow and follows this order on Windows:
-  1. Check native Hydra first with `shutil.which("hydra")` and common folders (`C:\tools\hydra`, `C:\Program Files\Hydra`, `./tools/hydra/hydra.exe`).
-  2. If a native executable is found outside PATH, ParserPro auto-adds the folder to current process PATH and persists User PATH via PowerShell environment update.
-  3. Run `wsl --list --quiet`, robustly normalize distro names (including malformed spaced names), and prioritize Kali-like distro names.
-  4. For each valid distro, run `wsl -d <distro> hydra --version`; first success is stored as `wsl_hydra_distro`.
-  5. If no distro has Hydra, ParserPro installs with `sudo apt update && sudo apt install -y hydra` in preferred `kali-linux` when present (or first valid distro).
-  6. If WSL is unavailable or WSL install fails, it falls back to native Windows Hydra by downloading/extracting into `tools/hydra` and re-validating `shutil.which("hydra")` after PATH updates.
-- **Runner-safe behavior**: if Hydra is still unavailable after all attempts, GUI still loads but Hydra Runner is disabled and shows a warning message when user tries to run commands.
-- Hydra auto-detected in WSL Kali or native; install manually if fails.
-- **User prompts**: startup uses `messagebox.showinfo` for successful install notifications and restart guidance when native PATH changes might require a fresh shell/app session.
-- **Selenium/Chromedriver auto-setup**: uses `webdriver_manager.chrome` to provision Chromedriver when not manually configured.
-- **NordVPN on Windows**: checks PATH and default install locations (`C:\Program Files\NordVPN`). If missing, it opens the NordVPN download page and raises a startup warning dialog with manual steps.
-- **Form method handling**: non-POST forms are retained, and Hydra templates use:
-  - `http-post-form` for POST
-  - `http-get-form` for GET
-  GET forms are marked with a warning that manual tuning may be required.
-- **Runner timeout/termination**: each Hydra process has a default 1-hour timeout (`hydra_timeout_seconds`, default `3600`) and is cleanly terminated on timeout/cancel/exit.
-- **Graceful shutdown**: window close now attempts to stop running subprocesses, terminate gost, and disconnect NordVPN CLI sessions.
-
-
-### New config flags
-
-In `data/config.json`:
-
-- `startup_dependency_checks` (default `true`)
-- `prefer_wsl_hydra` (default `true`)
-- `auto_install_hydra` (default `true`)
-- `hydra_timeout_seconds` (default `3600`)
-- `auto_setup_chromedriver` (default `true`)
-- `auto_configure_nordvpn_path` (default `true`)
-
-## Troubleshooting
-
-- **Selenium: `WebDriver.__init__() got multiple values for argument options`**
-  ParserPro now uses Selenium 4 style initialization (`webdriver.Chrome(service=..., options=...)`) and avoids passing `options` twice.
-- **Missing Chrome/Chromedriver**
-  If Selenium cannot start, install Chrome/Chromium or set `chrome_driver_path` in `data/config.json`.
-- **TLS/SSL failures through proxy**
-  Playwright/Selenium now log a TLS hint when a proxy is active (`proxy may be breaking TLS`). Keep `ignore_https_errors` disabled unless you intentionally need it.
-- **`ERR_SOCKS_CONNECTION_FAILED`**
-  Your SOCKS proxy endpoint is not reachable (commonly `127.0.0.1:1080` when gost is not running). Disable proxy settings (`burp_proxy`, `socks_proxy`, `proxy`) or start the proxy process.
-- **Verify proxy health quickly**
-  Confirm the listener is up before extraction, e.g. `python -c "import socket;print(socket.create_connection(('127.0.0.1',1080),1))"` (should connect without exception).
-- **Windows proxy startup check / fallback**
-  On GUI startup, ParserPro tests `proxy_url` against `https://httpbin.org/ip` (5s timeout). If the proxy test fails, proxy is disabled in config and a warning is shown, then extraction continues directly.
-- **Chromedriver repeated setup logs**
-  Chromedriver is initialized once at startup and reused via `chrome_driver_path`, avoiding repeated per-request webdriver-manager installs/fallback noise.
-## Extraction cache behavior
-
-- Cache is stored in `data/processed_sites.json` and reused on later runs.
-- By default, sites with recent `success` or `no_form` status are skipped until TTL expires.
-- Sites with `fetch_failed` are retried after a shorter TTL, or immediately with **Retry Failed**.
-- The Extractor log reports per-site outcome: login form found, no form found, cached skip, invalid-target skip, or fetch failure code.
-- Root-level legacy `processed_sites.json` is migrated once into `data/processed_sites.json`.
-
-## Why targets may be skipped
-
-Some combo lists contain host:port endpoints that are not browser login pages (for example mining dashboard/service ports). ParserPro validates targets before Playwright/Selenium navigation and skips likely non-web entries to reduce noisy browser errors such as `ERR_CONNECTION_CLOSED`.
-
-
-- **Navigation error codes**
-  - `dns_failed`: DNS resolution failed. ParserPro records this and waits for retry TTL instead of immediate retry.
-  - `conn_closed`: Remote side closed connection or target is not a web endpoint. ParserPro retries once with short backoff.
-  - `tls_mismatch`: TLS negotiation failed (often proxy/AV interception issues).
-  - `cert_invalid`: Certificate is untrusted (possible MITM/captive portal).
-  - `proxy_down`: Configured SOCKS proxy is unreachable; ParserPro retries once without proxy for that run.
-  - `fetch_failed`: Generic navigation failure fallback when no known signature is matched.
-
-- **What “login-ish” means**
-  ParserPro now stores forms with password fields even if they are not strict POST login forms. These entries are marked `success_loginish` with metadata (`method`, `action_url`, `user_field`, `pass_field`, `submit_mode`, confidence/reasons) so reruns can skip redundant fetches while still surfacing useful extraction context.
-
-
-## Project files (.pproj / .parserproproj.json)
-
-ParserPro now supports portable **project files** with schema versioning (`schema_version: 1`). A project captures session context without storing secrets:
-
-- Project name, created/last-saved timestamps
-- Input references and embedded site list snapshot
-- Runner filter state + sort state + selected rows
-- Results snapshot per site (status, extraction metadata, error code/hint/detail, timestamps)
-- Session-safe settings (`proxy_url`, `allow_nonstandard_ports`, `ignore_https_errors`, autosave preferences)
-
-Use **File → New/Open/Save/Save As** in the GUI. Project writes use atomic temp-file replacement to reduce corruption risk.
-
-## Report export
-
-Use **File → Export → JSON/CSV**.
-
-- JSON includes project metadata, summary counts, and per-site records.
-- CSV flattens key per-site fields using UTF-8 with standard CSV quoting.
-- Exports can target either full data or the current filtered view.
-
-## Troubleshooting dashboard
-
-A new **Troubleshooting** tab summarizes failures by category:
-
-- DNS failures (`dns_failed`, `ERR_NAME_NOT_RESOLVED`)
-- TLS failures (`tls_mismatch`, `cert_invalid`)
-- Proxy failures (`proxy_down`, `ERR_SOCKS_CONNECTION_FAILED`)
-- Connection closed (`conn_closed`, `ERR_CONNECTION_CLOSED`)
-- Other fetch failures
-
-The tab shows category counts, top failing domains, per-site details, static recommended actions, and includes:
-
-- **Retry Failed** (re-queues failed sites using existing controls)
-- **Export Diagnostics CSV**
-
-## Burp + ZAP + Credential Testing (new)
-
-- Added dedicated GUI tabs:
-  - **Burp Tester**: launch Burp Suite Community and export current extracted target data (`data/burp_import.json`).
-  - **ZAP Tester**: launch OWASP ZAP (optionally daemon mode) and import current targets into ZAP API active scans.
-- Settings now include:
-  - `use_burp`, `burp_proxy` (default `http://127.0.0.1:8080`)
-  - `use_zap`, `zap_proxy` (default `http://127.0.0.1:8080`)
-  - `zap_api_key`, `auto_start_zap_daemon`
-- Unified proxy routing: Playwright, Selenium, extraction pipeline, and Hydra runner now respect interceptor preference (`Burp` first if enabled, otherwise `ZAP`, otherwise normal proxy settings).
-- Login flow analyzer now supports GET/POST/other methods:
-  - Generates Hydra `http-get-form`/`http-post-form` when supported.
-  - Marks unsupported methods for custom testing.
-- Added GUI action **Test Credentials (Selected Site)**:
-  - Uses per-site combos against extracted form fields.
-  - Saves successful entries to `hits/hits_<domain>.txt` including method used.
-
-### Burp CA certificate note
-
-For HTTPS interception, install Burp's CA certificate into the trust store used by your browser/tooling environment. Without this, TLS requests may fail or be blocked. On Python clients you can also point to a trusted CA file using `REQUESTS_CA_BUNDLE`.
-
-### Windows-first notes
-
-- Burp/ZAP launch uses Windows executable/batch detection first and `shell=True` where appropriate.
-- Linux/macOS paths fall back to `burpsuite` / `zaproxy` style commands when available.
