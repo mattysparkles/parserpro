@@ -371,6 +371,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
 
     submit_mode = best_candidate["submit_mode"]
     failure = detect_failure_string(soup, url)
+    failure_value = failure[2:] if failure.startswith("F=") else failure
     post_data = "&".join(post_parts)
 
     status = "success_form" if submit_mode in {"native_post", "native_get"} and username_field and password_field else "success_loginish"
@@ -381,8 +382,9 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Use combined user:pass combo mode with a stable {{combo_file}} placeholder.
-            hydra_template = f'hydra -C "{{{{combo_file}}}}" {target} {hydra_module} "{action}:{post_data}:{failure}" -V -t 4 -f'
+            # FIXED: Duplicate arg removal + -C enforcement
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" {target} http-post-form "{action}:{post_data}:F={failure_value}" -V -t 4 -f'
+            hydra_template = cmd_template
         else:
             custom_tester_required = True
 
