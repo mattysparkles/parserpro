@@ -396,23 +396,24 @@ class RunnerMixin:
                 continue
 
             combo_file = str(combo_file_path.resolve())
+
+            cmd_template = str(cmd_template)
+            self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
+
             # FIXED: Quoted target + form escaping for Windows
             combo_file = combo_file.replace("\\", "/")  # Hydra prefers forward slashes
+            cmd = cmd_template.replace("{{combo_file}}", combo_file)
+            self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
+
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            cmd_template = str(cmd_template)
-            self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
-
-            cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
-
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
-            if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower():
+            if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower() and "&" in cmd:
                 cmd = cmd.replace("&", "^&")
             self._append_hydra_log_threadsafe(f"[AFTER CLEANUP] {cmd}\n")
 
