@@ -396,8 +396,8 @@ class RunnerMixin:
                 continue
 
             combo_file = str(combo_file_path.resolve())
-            # FIXED: Enforced -C + multi-stage logging + cleanup
-            combo_file = combo_file.replace("\\", "/")
+            # FIXED: Quoted target + form escaping for Windows
+            combo_file = combo_file.replace("\\", "/")  # Hydra prefers forward slashes
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
@@ -409,9 +409,11 @@ class RunnerMixin:
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             self._append_hydra_log_threadsafe(f"[AFTER REPLACE] {cmd}\n")
 
-            cmd = re.sub(r' -L ".+?" -P ".+?"', f' -C "{combo_file}"', cmd)
-            cmd = re.sub(r' -P ""', '', cmd)
-            cmd = re.sub(r'"{combo_file}" "{combo_file}"', f'"{combo_file}"', cmd)
+            target = site
+            if f'"{target}"' not in cmd:
+                cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
+            if os.name == "nt" and "wsl " not in cmd.lower() and "wsl -d" not in cmd.lower():
+                cmd = cmd.replace("&", "^&")
             self._append_hydra_log_threadsafe(f"[AFTER CLEANUP] {cmd}\n")
 
             if "-L" in cmd or "-P" in cmd:
@@ -450,7 +452,7 @@ class RunnerMixin:
                 self._append_hydra_log_threadsafe(f"Command: {cmd}\n")
             self._append_hydra_log_threadsafe(f"[VALIDATED CMD] {cmd}\n")
             self.hydra_log.insert(tk.END, f"[VALIDATED CMD] {cmd}\n")
-            self._append_hydra_log_threadsafe(f"[EXECUTING] {cmd}\n")
+            self._append_hydra_log_threadsafe(f"[EXECUTING CLEAN] {cmd}\n")
             print(f"[runner-debug] final hydra command for {site}: {cmd}")
 
             try:
@@ -503,6 +505,8 @@ class RunnerMixin:
                     self._set_row_status(site, "Pending")
                 else:
                     self._append_hydra_log_threadsafe(f"[ERROR] Command exited with code {process.returncode} for {site}\n")
+                    if process.returncode == 255:
+                        self._append_hydra_log_threadsafe("Hydra syntax error — check form string quoting\n")
                     self._set_row_status(site, "Failed")
             except Exception as e:
                 self._append_hydra_log_threadsafe(f"Error running command for {site}: {e}\n")
