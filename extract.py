@@ -382,7 +382,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Duplicate arg removal + -C enforcement
+            # FIXED: Switched to -C + removed old flags + duplicate cleanup
             cmd_template = f'hydra -C "{{{{combo_file}}}}" {target} http-post-form "{action}:{post_data}:F={failure_value}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
