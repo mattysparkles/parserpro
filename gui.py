@@ -11,7 +11,7 @@ import uuid
 
 import requests
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -2017,114 +2017,154 @@ class CombinedParserGUI(RunnerMixin):
                     rotation_counter += 1
                     return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
-                with ThreadPoolExecutor(max_workers=self.threads.get()) as executor:
+                timeout_seconds = max(15, int(config.get("extract_site_timeout_seconds", 120) or 120))
+                executor = ThreadPoolExecutor(max_workers=self.threads.get())
+                try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
-                    for i, future in enumerate(as_completed(future_to_base), 1):
-                        if self.cancel_event.is_set():
-                            if self.active_run_context is not None:
-                                self.active_run_context["processed_sites"] = run_processed_sites
-                                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
-                                self.active_run_context["extract_ms_values"] = run_extract_ms_values
-                            self._finalize_active_run()
-                            self.cleanup_after_pipeline("Cancelled during extraction")
-                            return
+                    future_started_at = {future: time.monotonic() for future in future_to_base}
+                    pending = set(future_to_base)
+                    i = 0
+                    while pending:
+                        done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                        now_mono = time.monotonic()
+                        timed_out = []
+                        for future in list(pending):
+                            if now_mono - future_started_at.get(future, now_mono) >= timeout_seconds:
+                                timed_out.append(future)
+                                pending.discard(future)
 
-                        if self.wait_if_paused_or_cancelled():
-                            if self.active_run_context is not None:
-                                self.active_run_context["processed_sites"] = run_processed_sites
-                                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
-                                self.active_run_context["extract_ms_values"] = run_extract_ms_values
-                            self._finalize_active_run()
-                            self.cleanup_after_pipeline("Cancelled while paused")
-                            return
-
-                        base = future_to_base[future]
-                        entry = self.processed_data.setdefault(base, {})
-                        now = datetime.now().isoformat()
-                        entry.setdefault("first_seen_ts", now)
-                        entry["last_checked_ts"] = now
-                        try:
-                            process_started = time.perf_counter()
-                            outcome = future.result() or {"status": "fetch_failed", "error_message": "unknown"}
-                            status = outcome.get("status")
-                            run_processed_sites.append(base)
-                            run_extract_ms_values.append((time.perf_counter() - process_started) * 1000)
-                            if status in {"success_form", "success_loginish"}:
-                                form = outcome["form"]
-                                form['base_url'] = base
-                                form['combo_file'] = get_site_filename(base)
-                                if form.get('hydra_command_template'):
-                                    form['full_hydra_command'] = form['hydra_command_template'].replace("{{combo_file}}", get_site_filename(base))
-                                    results.append(form)
-                                entry.update({
-                                    "status": status,
-                                    "form_found": status == "success_form",
-                                    "last_error_code": None,
-                                    "last_error_hint": None,
-                                    "last_error_detail": None,
-                                    "last_error_stacktrace": None,
-                                    "hydra_command_template": form.get("hydra_command_template", ""),
-                                    "extracted": {
-                                        "page_url": form.get("original_url"),
-                                        "action_url": form.get("action_url") or form.get("action"),
-                                        "method": form.get("method", "unknown"),
-                                        "user_field": form.get("user_field"),
-                                        "pass_field": form.get("pass_field"),
-                                        "other_fields": form.get("post_data", ""),
-                                        "confidence": form.get("confidence"),
-                                        "reasons": form.get("reasons"),
-                                        "submit_mode": form.get("submit_mode", "unknown"),
-                                        "classification": form.get("classification"),
-                                        "login_metadata": form.get("login_metadata", {}),
-                                        "observed_login_flow": form.get("observed_login_flow"),
-                                    },
-                                })
-                                reason = form.get('validation_reason') or form.get('reasons') or 'ok'
-                                self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
-                                if form.get('method') == 'get':
-                                    self._write_log_threadsafe(f"{base} :: WARN GET login form detected; hydra tuning may be required")
-                            elif status == "skipped_invalid_target":
-                                reason = outcome.get('reason', 'invalid target')
-                                entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "invalid_target", "last_error_hint": reason, "last_error_detail": reason})
-                                self._write_log_threadsafe(f"{base} :: status=skipped_invalid_target confidence=0 reason={reason}")
-                            elif status == "no_form":
-                                reason = outcome.get('reason', 'no matching form')
-                                entry.update({"status": "no_form", "form_found": False, "last_error_code": None, "last_error_hint": None, "last_error_detail": None})
-                                self._write_log_threadsafe(f"{base} :: status=no_form ❌ no login form confidence=0 reason={reason}")
-                            else:
-                                code = outcome.get("error_code") or "fetch_failed"
-                                hint = outcome.get("error_hint") or outcome.get("hint") or "Navigation failed"
-                                detail = outcome.get("error_detail") or outcome.get("error_message") or "fetch failed"
-                                stacktrace = outcome.get("error_stacktrace")
-                                entry.update({"status": "failed", "form_found": False, "last_error_code": code, "last_error_hint": hint, "last_error_detail": detail, "last_error_stacktrace": stacktrace})
-                                extra = f" detail={detail}" if self.show_debug_details.get() else ""
-                                if self.show_debug_details.get() and stacktrace:
-                                    extra += f" stack={stacktrace.splitlines()[-1]}"
-                                self._write_log_threadsafe(f"{base} :: status=failed confidence=0 reason={hint}{extra}")
-                                if code == "proxy_down":
-                                    self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"site": base})
-                                elif code == "dns_failed":
-                                    self.record_event("WARN", "dns", "failure", "DNS failure detected", {"site": base})
-                                elif code in {"tls_mismatch", "cert_invalid"}:
-                                    self.record_event("WARN", "tls", "failure", "TLS mismatch/certificate invalid", {"site": base, "error_code": code})
-
-                                now_ts = time.time()
-                                self.timeline_fetch_failures.append(now_ts)
-                                while self.timeline_fetch_failures and now_ts - self.timeline_fetch_failures[0] > 60:
-                                    self.timeline_fetch_failures.popleft()
-                                if len(self.timeline_fetch_failures) >= 20 and now_ts - self.timeline_last_fetch_burst_ts > 60:
-                                    self.timeline_last_fetch_burst_ts = now_ts
-                                    self.record_event("WARN", "network", "burst", "Fetch failure burst detected", {"failures": len(self.timeline_fetch_failures), "window_seconds": 60})
-
+                        for future in timed_out:
+                            base = future_to_base[future]
+                            future.cancel()
+                            i += 1
+                            entry = self.processed_data.setdefault(base, {})
+                            now = datetime.now().isoformat()
+                            entry.setdefault("first_seen_ts", now)
+                            entry["last_checked_ts"] = now
+                            entry.update({
+                                "status": "failed",
+                                "form_found": False,
+                                "last_error_code": "extract_timeout",
+                                "last_error_hint": "Extraction timed out",
+                                "last_error_detail": f"Site extraction exceeded {timeout_seconds}s and was skipped",
+                                "last_error_stacktrace": None,
+                            })
                             entry["combo_count"] = self.processed_data.get(base, {}).get('combo_count', 0)
-                        except Exception as e:
-                            if bool(config.get("debug_logging", False)):
-                                logger.debug(f"Thread error for {base}: {e}")
+                            run_processed_sites.append(base)
+                            run_extract_ms_values.append(timeout_seconds * 1000)
+                            self._write_log_threadsafe(f"{base} :: status=failed confidence=0 reason=Extraction timed out after {timeout_seconds}s")
+                            self._update_progress_threadsafe(value=i)
+                            self._update_status_threadsafe(f"Extracting: {i}/{total}")
 
-                        self._update_progress_threadsafe(value=i)
-                        self._update_status_threadsafe(f"Extracting: {i}/{total}")
-                        if i % 10 == 0:
-                            self.save_processed_data()
+                        for future in done:
+                            i += 1
+                            if self.cancel_event.is_set():
+                                if self.active_run_context is not None:
+                                    self.active_run_context["processed_sites"] = run_processed_sites
+                                    self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                                    self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                                self._finalize_active_run()
+                                self.cleanup_after_pipeline("Cancelled during extraction")
+                                return
+
+                            if self.wait_if_paused_or_cancelled():
+                                if self.active_run_context is not None:
+                                    self.active_run_context["processed_sites"] = run_processed_sites
+                                    self.active_run_context["fetch_ms_values"] = run_fetch_ms_values
+                                    self.active_run_context["extract_ms_values"] = run_extract_ms_values
+                                self._finalize_active_run()
+                                self.cleanup_after_pipeline("Cancelled while paused")
+                                return
+
+                            base = future_to_base[future]
+                            entry = self.processed_data.setdefault(base, {})
+                            now = datetime.now().isoformat()
+                            entry.setdefault("first_seen_ts", now)
+                            entry["last_checked_ts"] = now
+                            try:
+                                process_started = time.perf_counter()
+                                outcome = future.result() or {"status": "fetch_failed", "error_message": "unknown"}
+                                status = outcome.get("status")
+                                run_processed_sites.append(base)
+                                run_extract_ms_values.append((time.perf_counter() - process_started) * 1000)
+                                if status in {"success_form", "success_loginish"}:
+                                    form = outcome["form"]
+                                    form['base_url'] = base
+                                    form['combo_file'] = get_site_filename(base)
+                                    if form.get('hydra_command_template'):
+                                        form['full_hydra_command'] = form['hydra_command_template'].replace("{{combo_file}}", get_site_filename(base))
+                                        results.append(form)
+                                    entry.update({
+                                        "status": status,
+                                        "form_found": status == "success_form",
+                                        "last_error_code": None,
+                                        "last_error_hint": None,
+                                        "last_error_detail": None,
+                                        "last_error_stacktrace": None,
+                                        "hydra_command_template": form.get("hydra_command_template", ""),
+                                        "extracted": {
+                                            "page_url": form.get("original_url"),
+                                            "action_url": form.get("action_url") or form.get("action"),
+                                            "method": form.get("method", "unknown"),
+                                            "user_field": form.get("user_field"),
+                                            "pass_field": form.get("pass_field"),
+                                            "other_fields": form.get("post_data", ""),
+                                            "confidence": form.get("confidence"),
+                                            "reasons": form.get("reasons"),
+                                            "submit_mode": form.get("submit_mode", "unknown"),
+                                            "classification": form.get("classification"),
+                                            "login_metadata": form.get("login_metadata", {}),
+                                            "observed_login_flow": form.get("observed_login_flow"),
+                                        },
+                                    })
+                                    reason = form.get('validation_reason') or form.get('reasons') or 'ok'
+                                    self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
+                                    if form.get('method') == 'get':
+                                        self._write_log_threadsafe(f"{base} :: WARN GET login form detected; hydra tuning may be required")
+                                elif status == "skipped_invalid_target":
+                                    reason = outcome.get('reason', 'invalid target')
+                                    entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "invalid_target", "last_error_hint": reason, "last_error_detail": reason})
+                                    self._write_log_threadsafe(f"{base} :: status=skipped_invalid_target confidence=0 reason={reason}")
+                                elif status == "no_form":
+                                    reason = outcome.get('reason', 'no matching form')
+                                    entry.update({"status": "no_form", "form_found": False, "last_error_code": None, "last_error_hint": None, "last_error_detail": None})
+                                    self._write_log_threadsafe(f"{base} :: status=no_form ❌ no login form confidence=0 reason={reason}")
+                                else:
+                                    code = outcome.get("error_code") or "fetch_failed"
+                                    hint = outcome.get("error_hint") or outcome.get("hint") or "Navigation failed"
+                                    detail = outcome.get("error_detail") or outcome.get("error_message") or "fetch failed"
+                                    stacktrace = outcome.get("error_stacktrace")
+                                    entry.update({"status": "failed", "form_found": False, "last_error_code": code, "last_error_hint": hint, "last_error_detail": detail, "last_error_stacktrace": stacktrace})
+                                    extra = f" detail={detail}" if self.show_debug_details.get() else ""
+                                    if self.show_debug_details.get() and stacktrace:
+                                        extra += f" stack={stacktrace.splitlines()[-1]}"
+                                    self._write_log_threadsafe(f"{base} :: status=failed confidence=0 reason={hint}{extra}")
+                                    if code == "proxy_down":
+                                        self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"site": base})
+                                    elif code == "dns_failed":
+                                        self.record_event("WARN", "dns", "failure", "DNS failure detected", {"site": base})
+                                    elif code in {"tls_mismatch", "cert_invalid"}:
+                                        self.record_event("WARN", "tls", "failure", "TLS mismatch/certificate invalid", {"site": base, "error_code": code})
+
+                                    now_ts = time.time()
+                                    self.timeline_fetch_failures.append(now_ts)
+                                    while self.timeline_fetch_failures and now_ts - self.timeline_fetch_failures[0] > 60:
+                                        self.timeline_fetch_failures.popleft()
+                                    if len(self.timeline_fetch_failures) >= 20 and now_ts - self.timeline_last_fetch_burst_ts > 60:
+                                        self.timeline_last_fetch_burst_ts = now_ts
+                                        self.record_event("WARN", "network", "burst", "Fetch failure burst detected", {"failures": len(self.timeline_fetch_failures), "window_seconds": 60})
+
+                                entry["combo_count"] = self.processed_data.get(base, {}).get('combo_count', 0)
+                            except Exception as e:
+                                if bool(config.get("debug_logging", False)):
+                                    logger.debug(f"Thread error for {base}: {e}")
+
+                            self._update_progress_threadsafe(value=i)
+                            self._update_status_threadsafe(f"Extracting: {i}/{total}")
+                            if i % 10 == 0:
+                                self.save_processed_data()
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
                 self._show_progress_threadsafe(False)
 
