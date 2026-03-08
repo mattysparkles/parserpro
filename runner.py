@@ -404,25 +404,22 @@ class RunnerMixin:
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             combo_file = combo_file.replace("\\", "/")  # forward slashes
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            self.hydra_log.insert(tk.END, f"[RAW CMD AFTER REPLACE] {cmd}\n")
+            self.hydra_log.insert(tk.END, f"[RAW AFTER REPLACE] {cmd}\n")
 
-            # FIXED: Aggressive but safe quote cleanup (no backreferences)
-            cmd = cmd.replace('http-post-form ""', 'http-post-form "')
-            cmd = cmd.replace('"" ', '" ')
+            # FIXED: Brute-force cleanup chain (simple replacements, no risky regex backreferences)
             cmd = cmd.replace('""', '"')
+            cmd = cmd.replace('" "', '"')
             cmd = cmd.replace('http-post-form "', 'http-post-form "')  # idempotent
-            self.hydra_log.insert(tk.END, f"[AFTER QUOTE CLEANUP] {cmd}\n")
-
-            # FIXED: Remove leaked regex artifacts
             cmd = cmd.replace('\\1', '')
             cmd = cmd.replace('\1', '')
+            self.hydra_log.insert(tk.END, f"[AFTER QUOTE COLLAPSE] {cmd}\n")
 
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
                 self._set_row_status(site, "Failed")
                 continue
 
-            # FIXED: Deduplicate caret placeholders
+            # FIXED: Belt-and-suspenders dedup for placeholder carets
             cmd = re.sub(r'\^{2,}', '^', cmd)
             self.hydra_log.insert(tk.END, f"[AFTER ^ DEDUP] {cmd}\n")
 
@@ -433,14 +430,17 @@ class RunnerMixin:
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
-            self.hydra_log.insert(tk.END, f"[FINAL EXECUTING] {cmd}\n")
-            # FIXED: Validation warns on minor issues but continues
+            self.hydra_log.insert(tk.END, f"[FINAL BEFORE RUN] {cmd}\n")
+
+            # FIXED: Warn for non-critical anomalies; only skip on critical validation failure
             if '""' in cmd or '\1' in cmd or '^^' in cmd:
                 self.hydra_log.insert(tk.END, "[WARN] Minor quoting/artifact detected — running anyway\n")
             if "-C" not in cmd or cmd.count(combo_file) != 1:
-                self.hydra_log.insert(tk.END, "[SKIP] Critical cmd invalid\n")
+                self.hydra_log.insert(tk.END, "[SKIP] Missing -C or file\n")
                 self._set_row_status(site, "Failed")
                 continue
+            else:
+                self.hydra_log.insert(tk.END, "[RUNNING] Command looks valid — executing\n")
 
             intercept_proxy = ""
             if bool(config.get("use_burp", False)):
