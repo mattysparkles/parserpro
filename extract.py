@@ -1,3 +1,4 @@
+import logging
 import re
 from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
@@ -382,13 +383,22 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Removed literal \1 leak + safe quote strip without backrefs
-            action = action.strip().strip('"')
-            post_data = post_data.replace("^USER^", "^USER^").replace("^PASS^", "^PASS^")
+            # FIXED: Normalize action/post_data safely and prevent nested quotes in form spec
+            action = action.strip().strip('"').strip("'")
+            post_data = post_data.strip()
+
+            # FIXED: Deduplicate caret placeholder artifacts to keep ^USER^ /^PASS^ valid
+            post_data = re.sub(r'\^{2,}', '^', post_data)
+
             print(f"[RAW ACTION] {action}")
             print(f"[RAW POST DATA] {post_data}")
+
+            # FIXED: Build Hydra form spec without extra wrapping quotes
             form_spec = f"{action}:{post_data}:F={failure_value}"
             print(f"[RAW FORM SPEC] {form_spec}")
+            logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
+
+            # FIXED: Keep command template quote layout stable for runner-side replacements
             cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" http-post-form "{form_spec}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
