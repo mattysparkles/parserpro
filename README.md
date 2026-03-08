@@ -403,6 +403,7 @@ These are the core persisted config options exposed in settings/defaults.
 - `prefer_wsl_hydra` - prefer WSL hydra backend when available.
 - `auto_install_hydra` - attempt auto install when Hydra missing.
 - `hydra_timeout_seconds` - runner timeout per Hydra process.
+- `extract_site_timeout_seconds` - per-site extraction ceiling before a site is marked timed out.
 - `wsl_username` - optional WSL user for install/commands.
 - `wsl_password` - optional password for sudo install flow.
 - `auto_setup_chromedriver` - install/setup chromedriver automatically.
@@ -516,4 +517,3 @@ python -m unittest discover -s tests -p 'test_*.py'
 - Codebase is modularized by responsibility.
 - Unit tests exist for validation and utility behavior.
 - `parserpro8.py` is retained for legacy/reference context.
-
