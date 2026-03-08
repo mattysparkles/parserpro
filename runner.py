@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -400,18 +401,13 @@ class RunnerMixin:
             cmd_template = str(cmd_template)
             self._append_hydra_log_threadsafe(f"[RAW TEMPLATE] {cmd_template}\n")
 
-            # FIXED: Build command, then normalize combo path and rebuild command with forward slashes
+            # FIXED: No shell + no & escape + action strip + ^ dedup
+            combo_file = combo_file.replace("\\", "/")
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            combo_file = combo_file.replace("\\", "/")  # forward slashes
-            cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            self.hydra_log.insert(tk.END, f"[RAW AFTER REPLACE] {cmd}\n")
-
-            # FIXED: Brute-force cleanup chain (simple replacements, no risky regex backreferences)
+            cmd = cmd.replace('http-post-form ""', 'http-post-form "')
+            cmd = cmd.replace('"" ', '" ')
             cmd = cmd.replace('""', '"')
-            cmd = cmd.replace('" "', '"')
-            cmd = cmd.replace('http-post-form "', 'http-post-form "')  # idempotent
-            cmd = cmd.replace('\\1', '')
-            cmd = cmd.replace('\1', '')
+            self.hydra_log.insert(tk.END, f"[RAW AFTER REPLACE] {cmd}\n")
             self.hydra_log.insert(tk.END, f"[AFTER QUOTE COLLAPSE] {cmd}\n")
 
             if not Path(combo_file).exists():
@@ -423,17 +419,13 @@ class RunnerMixin:
             cmd = re.sub(r'\^{2,}', '^', cmd)
             self.hydra_log.insert(tk.END, f"[AFTER ^ DEDUP] {cmd}\n")
 
-            # FIXED: Escape ampersands for Windows cmd.exe
-            cmd = cmd.replace("&", "^&")
-            self.hydra_log.insert(tk.END, f"[AFTER & ESCAPE] {cmd}\n")
-
             target = site
             if f'"{target}"' not in cmd:
                 cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
             self.hydra_log.insert(tk.END, f"[FINAL BEFORE RUN] {cmd}\n")
 
             # FIXED: Warn for non-critical anomalies; only skip on critical validation failure
-            if '""' in cmd or '\1' in cmd or '^^' in cmd:
+            if '""' in cmd or '^^' in cmd:
                 self.hydra_log.insert(tk.END, "[WARN] Minor quoting/artifact detected — running anyway\n")
             if "-C" not in cmd or cmd.count(combo_file) != 1:
                 self.hydra_log.insert(tk.END, "[SKIP] Missing -C or file\n")
@@ -484,41 +476,55 @@ class RunnerMixin:
                         bufsize=1,
                     )
                 else:
-                    process = subprocess.Popen(
-                        cmd,
-                        shell=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
+                    split_cmd = shlex.split(cmd)
+                    completed = subprocess.run(
+                        split_cmd,
+                        capture_output=True,
+                        shell=False,
                         text=True,
                         encoding="utf-8",
                         errors="replace",
-                        bufsize=1,
                     )
+                    for line in completed.stdout.splitlines(True):
+                        self._append_hydra_log_threadsafe(line)
+                        with runner_log_file.open("a", encoding="utf-8") as lf:
+                            lf.write(line)
+                        self._capture_hit(site, line)
+                    if completed.stderr:
+                        self._append_hydra_log_threadsafe(completed.stderr)
+                        with runner_log_file.open("a", encoding="utf-8") as lf:
+                            lf.write(completed.stderr)
+                    process = None
 
-                self.runner_active_process = process
-                self.register_running_process(process)
-                for line in iter(process.stdout.readline, ""):
-                    self._append_hydra_log_threadsafe(line)
-                    with runner_log_file.open("a", encoding="utf-8") as lf:
-                        lf.write(line)
-                    if self.cancel_event.is_set():
-                        self._terminate_process_tree(process, "user_cancel")
-                        break
-                    self._capture_hit(site, line)
+                if process is not None:
+                    self.runner_active_process = process
+                    self.register_running_process(process)
+                    for line in iter(process.stdout.readline, ""):
+                        self._append_hydra_log_threadsafe(line)
+                        with runner_log_file.open("a", encoding="utf-8") as lf:
+                            lf.write(line)
+                        if self.cancel_event.is_set():
+                            self._terminate_process_tree(process, "user_cancel")
+                            break
+                        self._capture_hit(site, line)
 
-                try:
-                    process.wait(timeout=timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    self._append_hydra_log_threadsafe(f"[WARN] Timeout reached ({timeout_seconds}s) for {site}; terminating process.\n")
-                    self._terminate_process_tree(process, "timeout")
-                if process.returncode == 0 and not self.cancel_event.is_set():
+                    try:
+                        process.wait(timeout=timeout_seconds)
+                    except subprocess.TimeoutExpired:
+                        self._append_hydra_log_threadsafe(f"[WARN] Timeout reached ({timeout_seconds}s) for {site}; terminating process.\n")
+                        self._terminate_process_tree(process, "timeout")
+                    returncode = process.returncode
+                else:
+                    returncode = completed.returncode
+
+                if returncode == 0 and not self.cancel_event.is_set():
                     self._append_hydra_log_threadsafe(f"[SUCCESS] Command finished for {site}\n")
                     self._set_row_status(site, "Success")
                 elif self.cancel_event.is_set():
                     self._set_row_status(site, "Pending")
                 else:
-                    self._append_hydra_log_threadsafe(f"[ERROR] Command exited with code {process.returncode} for {site}\n")
-                    if process.returncode == 255:
+                    self._append_hydra_log_threadsafe(f"[ERROR] Command exited with code {returncode} for {site}\n")
+                    if returncode == 255:
                         self._append_hydra_log_threadsafe("Hydra syntax error — check form string quoting\n")
                     self._set_row_status(site, "Failed")
             except Exception as e:

@@ -343,6 +343,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     best_confidence = best_candidate["confidence"]
     best_reason = best_candidate["reason"]
     action = best_candidate["action_url"]
+    action = action.strip().strip('"').strip("'")
     method = (best_candidate.get("method") or "post").lower()
 
     post_parts = []
@@ -374,6 +375,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     failure = detect_failure_string(soup, url)
     failure_value = failure[2:] if failure.startswith("F=") else failure
     post_data = "&".join(post_parts)
+    post_data = re.sub(r'\^{2,}', '^', post_data)  # dedup ^
 
     status = "success_form" if submit_mode in {"native_post", "native_get"} and username_field and password_field else "success_loginish"
 
@@ -384,7 +386,6 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
             # FIXED: Strip stray wrapping quotes from extracted action and post payload
-            action = action.strip(' "\'')
             post_data = post_data.strip(' "\'')
 
             # FIXED: Insert placeholders exactly once and avoid duplicate placeholder expansion
@@ -406,7 +407,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
             print(f"[EXTRACT DEBUG] form_spec: {form_spec}")
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
-            # FIXED: Keep command template quote layout stable for runner-side replacements
+            # FIXED: No shell + no & escape + action strip + ^ dedup
             cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" http-post-form "{form_spec}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
