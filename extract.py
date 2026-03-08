@@ -383,19 +383,27 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         target = urlparse(url).netloc or url
         hydra_module = hydra_module_for_method(method)
         if hydra_module:
-            # FIXED: Normalize action/post_data safely and prevent nested quotes in form spec
-            action = action.strip().strip('"').strip("'")
-            post_data = post_data.strip()
+            # FIXED: Strip stray wrapping quotes from extracted action and post payload
+            action = action.strip(' "\'')
+            post_data = post_data.strip(' "\'')
 
-            # FIXED: Deduplicate caret placeholder artifacts to keep ^USER^ /^PASS^ valid
+            # FIXED: Insert placeholders exactly once and avoid duplicate placeholder expansion
+            if username_field:
+                post_data = post_data.replace(f"{username_field}=^USER^", f"{username_field}=username_field")
+                post_data = post_data.replace("username_field", "^USER^")
+            if password_field:
+                post_data = post_data.replace(f"{password_field}=^PASS^", f"{password_field}=password_field")
+                post_data = post_data.replace("password_field", "^PASS^")
+
+            # FIXED: Deduplicate caret artifacts to keep ^USER^ /^PASS^ valid tokens
             post_data = re.sub(r'\^{2,}', '^', post_data)
 
             print(f"[RAW ACTION] {action}")
             print(f"[RAW POST DATA] {post_data}")
 
-            # FIXED: Build Hydra form spec without extra wrapping quotes
+            # FIXED: Build Hydra form spec without nested quoting
             form_spec = f"{action}:{post_data}:F={failure_value}"
-            print(f"[RAW FORM SPEC] {form_spec}")
+            print(f"[EXTRACT DEBUG] form_spec: {form_spec}")
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
             # FIXED: Keep command template quote layout stable for runner-side replacements
