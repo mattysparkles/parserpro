@@ -292,7 +292,14 @@ def main() -> None:
     root = tk.Tk()
     CombinedParserGUI(root)
     _schedule_gui_startup_checks(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        logging.info("KeyboardInterrupt received, exiting GUI gracefully")
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

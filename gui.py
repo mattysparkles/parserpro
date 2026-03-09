@@ -90,6 +90,7 @@ class CombinedParserGUI(RunnerMixin):
         self.tld_only = tk.BooleanVar(value=True)
         self.threads = tk.IntVar(value=6)
         self.strict_validation = tk.BooleanVar(value=True)
+        self.use_playwright_dynamic = tk.BooleanVar(value=bool(config.get("use_playwright_dynamic", False)))
         self.force_recheck = tk.BooleanVar(value=bool(config.get("force_recheck", False)))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         self.use_burp = tk.BooleanVar(value=bool(config.get("use_burp", False)))
@@ -655,6 +656,7 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(opt_f, text="Create user:pass combo.txt per site", variable=self.create_combo).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Extract login forms", variable=self.extract_forms).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Strict form validation", variable=self.strict_validation).pack(anchor="w", pady=4)
+        ttk.Checkbutton(opt_f, text="Use Playwright dynamic rendering fallback", variable=self.use_playwright_dynamic).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Force recheck (ignore cache TTL)", variable=self.force_recheck).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Show debug details", variable=self.show_debug_details).pack(anchor="w", pady=4)
 
@@ -952,6 +954,7 @@ class CombinedParserGUI(RunnerMixin):
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
+        config['use_playwright_dynamic'] = bool(self.use_playwright_dynamic.get())
         self.autosave_enabled.set(bool(self.autosave_enabled_setting.get()))
         self.autosave_interval_minutes.set(max(1, int(self.autosave_interval_setting.get() or 2)))
         config['autosave_enabled'] = bool(self.autosave_enabled.get())
@@ -1888,6 +1891,8 @@ class CombinedParserGUI(RunnerMixin):
                                 base = get_base_url(orig_url)
                                 if base:
                                     site_combos.setdefault(base, set()).add(f"{user}:{pw}")
+                            else:
+                                skipped += 1
 
             self._write_log_threadsafe(f"Main CSV: {len(rows)} rows | {skipped} skipped")
 
@@ -1966,6 +1971,7 @@ class CombinedParserGUI(RunnerMixin):
                 self._show_progress_threadsafe(True)
 
                 results = []
+                forms_found_count = 0
                 total = len(site_list)
                 rotation_counter = 0
 
@@ -1997,7 +2003,7 @@ class CombinedParserGUI(RunnerMixin):
                             url,
                             current_proxy,
                             strict_validation=self.strict_validation.get(),
-                            mode=str(config.get("analysis_mode", "static") or "static"),
+                            mode=("playwright" if self.use_playwright_dynamic.get() else str(config.get("analysis_mode", "static") or "static")),
                             observation_options={
                                 "enable_dummy_interaction": bool(config.get("observation_enable_dummy_interaction", False)),
                                 "allowlisted_domains": config.get("observation_allowlisted_domains", []) or [],
@@ -2054,7 +2060,8 @@ class CombinedParserGUI(RunnerMixin):
                             run_extract_ms_values.append(timeout_seconds * 1000)
                             self._write_log_threadsafe(f"{base} :: status=failed confidence=0 reason=Extraction timed out after {timeout_seconds}s")
                             self._update_progress_threadsafe(value=i)
-                            self._update_status_threadsafe(f"Extracting: {i}/{total}")
+                            percent = (forms_found_count / i * 100.0) if i else 0.0
+                            self._update_status_threadsafe(f"Extracting: {i}/{total} | forms found {forms_found_count}/{i} ({percent:.1f}%)")
 
                         for future in done:
                             i += 1
@@ -2094,6 +2101,7 @@ class CombinedParserGUI(RunnerMixin):
                                     if form.get('hydra_command_template'):
                                         form['full_hydra_command'] = form['hydra_command_template'].replace("{{combo_file}}", get_site_filename(base))
                                         results.append(form)
+                                        forms_found_count += 1
                                     entry.update({
                                         "status": status,
                                         "form_found": status == "success_form",
@@ -2160,7 +2168,8 @@ class CombinedParserGUI(RunnerMixin):
                                     logger.debug(f"Thread error for {base}: {e}")
 
                             self._update_progress_threadsafe(value=i)
-                            self._update_status_threadsafe(f"Extracting: {i}/{total}")
+                            percent = (forms_found_count / i * 100.0) if i else 0.0
+                            self._update_status_threadsafe(f"Extracting: {i}/{total} | forms found {forms_found_count}/{i} ({percent:.1f}%)")
                             if i % 10 == 0:
                                 self.save_processed_data()
                 finally:

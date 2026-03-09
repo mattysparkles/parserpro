@@ -59,3 +59,24 @@ def export_data_for_burp(site_data):
 def parse_host_port(proxy_url: str):
     parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
     return parsed.hostname or "127.0.0.1", parsed.port or 8080
+
+
+def generate_intruder_payloads_xml(site_rows):
+    """Create a simple Burp Intruder payload XML for username/password pairs."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    out = DATA_DIR / "burp_intruder_payloads.xml"
+    items = []
+    for row in site_rows or []:
+        user = str((row or {}).get("username") or "").strip()
+        pwd = str((row or {}).get("password") or "").strip()
+        if not (user or pwd):
+            continue
+        items.append(f"    <payload>{user}:{pwd}</payload>")
+    payload_blob = "\n".join(items)
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<intruderPayloads>
+{payload_blob}
+</intruderPayloads>
+"""
+    out.write_text(xml, encoding="utf-8")
+    return out
