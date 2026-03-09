@@ -18,6 +18,7 @@ import requests
 
 from app_logging import logger
 from helpers import log_once
+from install_tools import HYDRA_DIR, install_hydra
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -152,6 +153,12 @@ def load_config():
     loaded.setdefault("zap_api_key", "")
     loaded.setdefault("auto_start_zap_daemon", False)
     loaded.setdefault("auto_install_security_tools", False)
+    loaded.setdefault("auto_install_hydra", True)
+    loaded.setdefault("auto_install_zap", True)
+    loaded.setdefault("auto_install_burp", True)
+    loaded.setdefault("HYDRA_BIN", "")
+    loaded.setdefault("ZAP_JAR", str((APP_DIR / "tools" / "zap" / "ZAP.jar").resolve()))
+    loaded.setdefault("BURP_JAR", str((APP_DIR / "tools" / "burp" / "burpsuite_community.jar").resolve()))
     loaded.setdefault("burp_executable_path", "")
     loaded.setdefault("zap_executable_path", "")
     loaded.setdefault("proxy_rotation", False)
@@ -251,9 +258,12 @@ def _wsl_available() -> bool:
 
 
 def _hydra_available_native() -> bool:
+    configured = str(config.get("HYDRA_BIN", "")).strip()
+    if configured and Path(configured).exists():
+        return True
     if shutil.which("hydra"):
         return True
-    win_hydra = HYDRA_WINDOWS_DIR / "hydra.exe"
+    win_hydra = HYDRA_DIR / "hydra.exe"
     return win_hydra.exists()
 
 
@@ -556,18 +566,29 @@ def check_and_setup_hydra(log_func=None):
                 "logs": logs,
             }
 
-    config["runner_enabled"] = False
-    manual = (
-        "Hydra not found (native or WSL). Install in WSL: sudo apt install -y hydra, "
-        "or install native Windows Hydra and ensure hydra.exe is on PATH."
-    )
+    reasons = []
+    if not shutil.which("hydra"):
+        reasons.append("hydra not in PATH")
+    if os.name == "nt" and not _wsl_available():
+        reasons.append("WSL not running")
+    if os.name == "nt" and not (HYDRA_DIR / "hydra.exe").exists():
+        reasons.append("tools/hydra/hydra.exe missing")
+
+    if auto_install:
+        _log_hydra(logs, "Hydra missing; auto-install attempt requested", log_func)
+        install_state = install_hydra(log_func=log_func)
+        _log_hydra(logs, install_state.get("message", "hydra install attempt complete"), log_func)
+        if install_state.get("ok"):
+            hydra_path = install_state.get("path")
+            if hydra_path:
+                config["HYDRA_BIN"] = hydra_path
+            return {"success": True, "available": True, "mode": "native", "message": install_state.get("message"), "logs": logs}
+
+    manual = "Hydra missing: " + ", ".join(reasons or ["binary version mismatch or unknown error"])
     config["hydra_unavailable_message"] = manual
+    config["hydra_status"] = "missing"
     _log_hydra(logs, manual, log_func)
-    try:
-        messagebox.showwarning("Hydra not available", manual)
-    except Exception:
-        pass
-    return {"success": False, "available": False, "mode": None, "message": manual, "logs": logs}
+    return {"success": False, "available": False, "mode": None, "message": manual, "logs": logs, "status": "missing"}
 
 
 def ensure_nordvpn_cli(log_func=None):

@@ -6,3 +6,4 @@ requests>=2.31.0
 deathbycaptcha>=0.1.1
 twocaptcha>=0.0.1
 cloudscraper>=1.2.71
+python-owasp-zap-v2.4>=0.0.20

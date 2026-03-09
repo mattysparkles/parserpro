@@ -539,3 +539,23 @@ python -m unittest discover -s tests -p 'test_*.py'
 - Added optional startup auto-install checks for OWASP ZAP and Burp Community (downloads staged under `tools/` and paths persisted in config).
 - Added Burp/ZAP workflow launch helpers from the GUI and runner mixin for quick payload generation and active-scan bootstrapping.
 - Improved operational stats messaging in extraction flow (forms-found percentage) and graceful interruption handling with subprocess cleanup.
+
+## Security tool auto-install and unified runners
+
+ParserPro now includes a **Tools** tab that can install Hydra, OWASP ZAP, and Burp Community directly from the GUI. The installer shows progress and writes detailed logs for each dependency.
+
+- Hydra detection checks native PATH, WSL (preferred when configured), and `tools/hydra/` on Windows.
+- If Hydra is missing, it is marked as **missing** (not permanently disabled), and the Hydra Runner shows an install prompt.
+- ZAP and Burp installers place jars under `tools/zap/ZAP.jar` and `tools/burp/burpsuite_community.jar`, and create helper launchers.
+
+### Troubleshooting Hydra disabled/check log
+
+If you see "Hydra disabled" or "check log":
+1. Open **Tools** tab and run install for Hydra.
+2. Verify Hydra is available in PATH or WSL (`hydra --version` or `wsl hydra --version`).
+3. Confirm your `prefer_wsl_hydra` and WSL distro settings.
+4. Re-open Hydra Runner and click **Install Hydra** if still missing.
+
+### Java requirement for ZAP/Burp
+
+ZAP and Burp jar launchers require Java in PATH (`java -version`).
