@@ -91,6 +91,7 @@ class CombinedParserGUI(RunnerMixin):
         self.threads = tk.IntVar(value=6)
         self.strict_validation = tk.BooleanVar(value=True)
         self.use_playwright_dynamic = tk.BooleanVar(value=bool(config.get("use_playwright_dynamic", False)))
+        self.advanced_extraction_mode = tk.BooleanVar(value=bool(config.get("advanced_extraction_mode", False)))
         self.force_recheck = tk.BooleanVar(value=bool(config.get("force_recheck", False)))
         self.burp_proxy = tk.StringVar(value=config.get("burp_proxy", ""))
         self.use_burp = tk.BooleanVar(value=bool(config.get("use_burp", False)))
@@ -657,6 +658,7 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(opt_f, text="Extract login forms", variable=self.extract_forms).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Strict form validation", variable=self.strict_validation).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Use Playwright dynamic rendering fallback", variable=self.use_playwright_dynamic).pack(anchor="w", pady=4)
+        ttk.Checkbutton(opt_f, text="Advanced extraction mode (deeper login discovery)", variable=self.advanced_extraction_mode).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Force recheck (ignore cache TTL)", variable=self.force_recheck).pack(anchor="w", pady=4)
         ttk.Checkbutton(opt_f, text="Show debug details", variable=self.show_debug_details).pack(anchor="w", pady=4)
 
@@ -955,6 +957,7 @@ class CombinedParserGUI(RunnerMixin):
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
         config['use_playwright_dynamic'] = bool(self.use_playwright_dynamic.get())
+        config['advanced_extraction_mode'] = bool(self.advanced_extraction_mode.get())
         self.autosave_enabled.set(bool(self.autosave_enabled_setting.get()))
         self.autosave_interval_minutes.set(max(1, int(self.autosave_interval_setting.get() or 2)))
         config['autosave_enabled'] = bool(self.autosave_enabled.get())
@@ -1013,6 +1016,10 @@ class CombinedParserGUI(RunnerMixin):
             self.gost_process = subprocess.Popen([str(gost_path), "-L=socks5://:1080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(3)
             return {"server": "socks5://127.0.0.1:1080"}
+        except KeyboardInterrupt:
+            self.cancel_event.set()
+            self._write_log_threadsafe("KeyboardInterrupt received. Stopping pipeline gracefully...")
+            self.cleanup_after_pipeline("Pipeline interrupted")
         except Exception as e:
             self._write_log_threadsafe(f"NordVPN / gost setup failed: {e}. Falling back to no proxy.")
             return None
@@ -2004,6 +2011,7 @@ class CombinedParserGUI(RunnerMixin):
                             current_proxy,
                             strict_validation=self.strict_validation.get(),
                             mode=("playwright" if self.use_playwright_dynamic.get() else str(config.get("analysis_mode", "static") or "static")),
+                            advanced_mode=bool(self.advanced_extraction_mode.get()),
                             observation_options={
                                 "enable_dummy_interaction": bool(config.get("observation_enable_dummy_interaction", False)),
                                 "allowlisted_domains": config.get("observation_allowlisted_domains", []) or [],
@@ -2176,6 +2184,8 @@ class CombinedParserGUI(RunnerMixin):
                     executor.shutdown(wait=False, cancel_futures=True)
 
                 self._show_progress_threadsafe(False)
+                extraction_rate = (forms_found_count / total * 100.0) if total else 0.0
+                self._write_log_threadsafe(f"Extraction summary: forms found {forms_found_count}/{total} ({extraction_rate:.1f}%). 10-30% can be normal for noisy combo lists.")
 
                 if results:
                     keys = ['original_url', 'base_url', 'used_url', 'used_type', 'action', 'post_data',
@@ -2198,6 +2208,15 @@ class CombinedParserGUI(RunnerMixin):
                 self.active_run_context["extract_ms_values"] = run_extract_ms_values
             self._finalize_active_run()
             self.cleanup_after_pipeline("Pipeline complete! Check per-site files and hydra_forms.csv")
+
+        except KeyboardInterrupt:
+            if self.active_run_context is not None:
+                self.active_run_context["processed_sites"] = run_processed_sites if "run_processed_sites" in locals() else []
+                self.active_run_context["fetch_ms_values"] = run_fetch_ms_values if "run_fetch_ms_values" in locals() else []
+                self.active_run_context["extract_ms_values"] = run_extract_ms_values if "run_extract_ms_values" in locals() else []
+            self.cancel_event.set()
+            self._finalize_active_run()
+            self.cleanup_after_pipeline("Pipeline interrupted (KeyboardInterrupt)")
 
         except Exception as e:
             if self.active_run_context is not None:

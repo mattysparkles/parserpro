@@ -524,6 +524,9 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 - Enable **Playwright dynamic rendering fallback** in GUI options for JS-rendered login pages.
 - ParserPro can optionally use `cloudscraper` fallback on HTTP 403 responses.
+- Requests/Playwright/Selenium fetches rotate realistic User-Agent headers to reduce basic anti-bot 403 blocks.
+- New **Advanced extraction mode** (GUI checkbox + config `advanced_extraction_mode`) enables deeper login discovery: Playwright follows up to 3 login/auth/signin links and applies broader field heuristics for hidden/non-standard forms.
+- Extraction status now logs form-find percentage (`forms found X/Y (%)`); for noisy Telegram combo dumps, ~10-30% detection can still be normal.
 - For complex session workflows (CAPTCHA/multi-step), export payloads and continue with Burp Intruder (`data/burp_intruder_payloads.xml`) or OWASP ZAP scripts.
 - For hardest flows, pair outputs with a custom Selenium/Playwright script for stateful session handling.
 
