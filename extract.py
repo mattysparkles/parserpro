@@ -11,8 +11,8 @@ except ImportError:
     HAS_BS4 = False
 
 from config import config, get_intercept_proxy
-from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_selenium, solve_captcha
-from helpers import normalize_and_validate_target, validate_url
+from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_requests, fetch_page_selenium, solve_captcha
+from helpers import COMMON_LOGIN_PATHS, get_base_url, normalize_and_validate_target, validate_url
 from login_tester import domain_from_url, hydra_module_for_method, save_hit
 
 
@@ -299,6 +299,47 @@ def observe_login_flow(url, proxy=None, allowlisted_domains=None, enable_dummy_i
     }
 
 
+
+
+def _loginish_paths_from_links(soup, page_url, limit=3):
+    out = []
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        text = f"{a.get_text(' ', strip=True)} {(a.get('href') or '')}".lower()
+        if not any(k in text for k in ("login", "log in", "signin", "sign-in", "auth", "account")):
+            continue
+        candidate = validate_url(urljoin(page_url, a.get("href")))
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _fetch_html_for_mode(url, proxy, mode):
+    preferred = (mode or "static").strip().lower()
+    attempts = []
+    if preferred == "playwright":
+        attempts = [fetch_page_playwright, fetch_page_requests, fetch_page_selenium]
+    else:
+        attempts = [fetch_page_requests, fetch_page_playwright, fetch_page_selenium]
+
+    last_error = None
+    used_playwright = False
+    for fetcher in attempts:
+        if fetcher == fetch_page_playwright and not HAS_PLAYWRIGHT:
+            continue
+        if fetcher == fetch_page_selenium and not HAS_SELENIUM:
+            continue
+        html, error = fetcher(url, proxy)
+        if fetcher == fetch_page_playwright:
+            used_playwright = bool(html)
+        if html:
+            return html, None, used_playwright
+        last_error = error
+    return None, last_error, used_playwright
+
 def extract_login_form(url, proxy=None, strict_validation=True, mode="static", observation_options=None):
     if not HAS_BS4:
         return None, "bs4_not_installed"
@@ -307,12 +348,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
     if not url:
         return None, {"status": "skipped_invalid_target", "reason": invalid_reason or "invalid target"}
 
-    html, error = fetch_page_playwright(url, proxy)
+    html, error, used_playwright = _fetch_html_for_mode(url, proxy, mode)
     fallback_used = False
-
-    if not html and HAS_SELENIUM:
-        html, error = fetch_page_selenium(url, proxy)
-        fallback_used = True
 
     if not html:
         if isinstance(error, dict):
@@ -333,11 +370,32 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         if html:
             soup = BeautifulSoup(html, "html.parser")
 
-    forms = soup.find_all("form")
-
     best_candidate = extract_loginish_metadata(soup, url)
+    checked_urls = [url]
     if not best_candidate:
-        return None, {"status": "no_form", "reason": "no login-like form detected"}
+        base = get_base_url(url) or url.rstrip('/')
+        extra_urls = [f"{base.rstrip('/')}{p}" for p in COMMON_LOGIN_PATHS[:5]]
+        extra_urls.extend(_loginish_paths_from_links(soup, url, limit=3))
+        seen = set(checked_urls)
+        for candidate in extra_urls[:5]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            checked_urls.append(candidate)
+            html2, error2, used_pw2 = _fetch_html_for_mode(candidate, proxy, mode)
+            used_playwright = used_playwright or used_pw2
+            if not html2:
+                continue
+            soup2 = BeautifulSoup(html2, "html.parser")
+            c = extract_loginish_metadata(soup2, candidate)
+            if c:
+                soup = soup2
+                best_candidate = c
+                url = candidate
+                break
+
+    if not best_candidate:
+        return None, {"status": "no_form", "reason": "no login-like form detected", "checked_urls": checked_urls}
 
     best_form = best_candidate["form"]
     best_confidence = best_candidate["confidence"]
@@ -408,7 +466,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
             # FIXED: No shell + no & escape + action strip + ^ dedup
-            cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" http-post-form "{form_spec}" -V -t 4 -f'
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" {hydra_module} "{form_spec}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
             custom_tester_required = True
@@ -423,6 +481,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         "confidence": best_confidence,
         "validation_reason": best_reason,
         "fallback_used": fallback_used,
+        "playwright_used": used_playwright,
+        "checked_urls": checked_urls,
         "method": method,
         "action_url": action,
         "user_field": username_field,

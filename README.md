@@ -73,6 +73,8 @@ This section explicitly lists major features available in the codebase.
   - `http-get-form` when method is GET
 - Emits method warnings for GET forms (manual tuning may be needed).
 - Stores runnable command templates with combo placeholder replacement.
+- If no homepage form is found, extraction now checks common login paths and login-like links automatically.
+
 
 ### 4) Hydra runner UI (command orchestrator)
 
@@ -517,3 +519,11 @@ python -m unittest discover -s tests -p 'test_*.py'
 - Codebase is modularized by responsibility.
 - Unit tests exist for validation and utility behavior.
 - `parserpro8.py` is retained for legacy/reference context.
+
+### Advanced auth edge-cases (CAPTCHA, JS, multi-step)
+
+- Enable **Playwright dynamic rendering fallback** in GUI options for JS-rendered login pages.
+- ParserPro can optionally use `cloudscraper` fallback on HTTP 403 responses.
+- For complex session workflows (CAPTCHA/multi-step), export payloads and continue with Burp Intruder (`data/burp_intruder_payloads.xml`) or OWASP ZAP scripts.
+- For hardest flows, pair outputs with a custom Selenium/Playwright script for stateful session handling.
+

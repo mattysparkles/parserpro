@@ -65,6 +65,13 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+try:
+    import cloudscraper
+
+    HAS_CLOUDSCRAPER = True
+except ImportError:
+    HAS_CLOUDSCRAPER = False
+
 
 ERROR_CODE_MAP = {
     "ERR_NAME_NOT_RESOLVED": ("dns_failed", "DNS resolution failed"),
@@ -301,6 +308,46 @@ def fetch_page_selenium(url, proxy=None):
     return None, build_error_payload("fetch_failed", "Navigation failed", "unknown selenium failure")
 
 
+
+
+def fetch_page_requests(url, proxy=None, timeout=20):
+    if not HAS_REQUESTS:
+        return None, build_error_payload("fetch_failed", "requests not installed", "requests dependency missing")
+
+    clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
+    if not clean_url:
+        return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
+
+    try:
+        effective_proxy = get_intercept_proxy(config, proxy)
+    except RuntimeError as e:
+        return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
+
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    proxies = None
+    if effective_proxy and effective_proxy.get("server"):
+        server = effective_proxy["server"]
+        proxies = {"http": server, "https": server}
+
+    try:
+        resp = requests.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
+        if resp.status_code == 403 and HAS_CLOUDSCRAPER and bool(config.get("enable_cloudscraper_fallback", True)):
+            try:
+                scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+                resp = scraper.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
+            except Exception as cloud_exc:
+                stack = _debug_stack(f"Cloudscraper failed {clean_url}", cloud_exc)
+                return None, build_error_payload("fetch_failed", "cloudscraper failed", str(cloud_exc), stacktrace=stack)
+        if resp.status_code >= 400:
+            return None, build_error_payload("http_error", f"HTTP {resp.status_code}", f"{clean_url} returned {resp.status_code}")
+        return resp.text, None
+    except requests.exceptions.Timeout as e:
+        return None, build_error_payload("fetch_timeout", "request timed out", str(e))
+    except requests.exceptions.RequestException as e:
+        stack = _debug_stack(f"Requests failed {clean_url}", e)
+        code, hint = classify_nav_error(str(e))
+        return None, build_error_payload(code, hint, str(e), stacktrace=stack)
+
 def _solve_with_anticaptcha(captcha_type, sitekey, url):
     if not HAS_ANTICAPTCHA or not config.get("anticaptcha_key"):
         return None
@@ -345,7 +392,7 @@ def _solve_with_capsolver(captcha_type, sitekey, url):
                 "websiteKey": sitekey,
             },
         }
-        create = requests.post("https://api.capsolver.com/createTask", json=payload, timeout=30).json()
+        create = requests.post("https://api.capsolver.com/createTask", json=payload, timeout=30, verify=False).json()
         task_id = create.get("taskId")
         if not task_id:
             logger.warn(f"Capsolver failed to create task: {create}")
@@ -355,6 +402,7 @@ def _solve_with_capsolver(captcha_type, sitekey, url):
                 "https://api.capsolver.com/getTaskResult",
                 json={"clientKey": config.get("capsolver_key"), "taskId": task_id},
                 timeout=30,
+                verify=False,
             ).json()
             if result.get("status") == "ready":
                 return (result.get("solution") or {}).get("gRecaptchaResponse") or (result.get("solution") or {}).get("token")
