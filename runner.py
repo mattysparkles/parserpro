@@ -12,6 +12,8 @@ from tkinter import messagebox, ttk
 
 from config import DATA_DIR, HITS_DIR, LOGS_DIR, build_wsl_command, config, ensure_hydra_available
 from helpers import get_site_filename, log_once
+from burp import run_burp_with_project
+from zap import run_zap_active_scan
 
 
 class RunnerMixin:
@@ -296,6 +298,23 @@ class RunnerMixin:
             messagebox.showinfo("No Selection", "Select at least one row using the checkbox column.")
             return
         self.start_runner_execution(selected)
+
+    def run_burp_runner(self):
+        rows = list((getattr(self, "processed_data", {}) or {}).values())
+        ok, msg = run_burp_with_project(rows, auto_install=bool(config.get("auto_install_security_tools", False)))
+        self._append_hydra_log_threadsafe(msg + "\n")
+        return ok
+
+    def run_zap_runner(self):
+        rows = list((getattr(self, "processed_data", {}) or {}).values())
+        ok, msg = run_zap_active_scan(
+            rows,
+            proxy_url=config.get("zap_proxy", "http://127.0.0.1:8080"),
+            api_key=config.get("zap_api_key", ""),
+            auto_install=bool(config.get("auto_install_security_tools", False)),
+        )
+        self._append_hydra_log_threadsafe(msg + "\n")
+        return ok
 
     def run_all_hydra(self):
         if not config.get("runner_enabled", True):

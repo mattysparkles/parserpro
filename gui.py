@@ -21,8 +21,9 @@ from tkinter import filedialog, messagebox, ttk
 from app_logging import logger
 from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
 from extract import extract_login_form, test_credentials_for_site
-from burp import BURP_DOWNLOAD_URL, launch_burp
-from zap import import_data_to_zap, launch_zap
+from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
+from zap import import_data_to_zap, launch_zap, run_zap_active_scan
+from install import ensure_burp_installed, ensure_zap_installed
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
 from proxies import ProxyManager
@@ -191,6 +192,12 @@ class CombinedParserGUI(RunnerMixin):
                     self._write_log_threadsafe(f"Chromedriver check: ready ({driver_path})")
                 else:
                     issues.append("Chromedriver path not initialized at startup")
+
+                if bool(config.get("auto_install_security_tools", False)):
+                    burp_state = ensure_burp_installed(auto_install=True)
+                    zap_state = ensure_zap_installed(auto_install=True)
+                    self._write_log_threadsafe(f"Burp check: {burp_state.get('message', burp_state.get('path', 'not found'))}")
+                    self._write_log_threadsafe(f"ZAP check: {zap_state.get('message', zap_state.get('path', 'not found'))}")
 
                 if get_vpn_control(config) == "nordvpn":
                     nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
@@ -865,6 +872,7 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Label(frame, text="Use this tab to launch Burp and export extracted form/command data.").pack(anchor="w", pady=(0, 10))
         ttk.Button(frame, text="Launch Burp Suite", command=self.on_launch_burp).pack(anchor="w", pady=4)
         ttk.Button(frame, text="Send current data to Burp", command=self.on_send_current_data_to_burp).pack(anchor="w", pady=4)
+        ttk.Button(frame, text="Run Burp workflow", command=self.on_run_burp_workflow).pack(anchor="w", pady=4)
 
     def build_zap_tab(self, tab):
         frame = ttk.Frame(tab, padding=12)
@@ -873,9 +881,10 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Label(frame, text="Launch ZAP and queue extracted URLs for active scan via API.").pack(anchor="w", pady=(0, 10))
         ttk.Button(frame, text="Launch OWASP ZAP", command=self.on_launch_zap).pack(anchor="w", pady=4)
         ttk.Button(frame, text="Import current data to ZAP", command=self.on_import_current_data_to_zap).pack(anchor="w", pady=4)
+        ttk.Button(frame, text="Run ZAP active scan", command=self.on_run_zap_workflow).pack(anchor="w", pady=4)
 
     def on_launch_burp(self):
-        ok, msg = launch_burp()
+        ok, msg = launch_burp(auto_install=bool(config.get("auto_install_security_tools", False)))
         (messagebox.showinfo if ok else messagebox.showwarning)("Burp", msg)
         if not ok:
             self._write_log_threadsafe(f"Burp launch fallback. Download: {BURP_DOWNLOAD_URL}")
@@ -907,6 +916,7 @@ class CombinedParserGUI(RunnerMixin):
             daemon=bool(config.get("auto_start_zap_daemon", False)),
             proxy_url=config.get("zap_proxy", "http://127.0.0.1:8080"),
             api_key=config.get("zap_api_key", ""),
+            auto_install=bool(config.get("auto_install_security_tools", False)),
         )
         (messagebox.showinfo if ok else messagebox.showwarning)("ZAP", msg)
 
@@ -952,6 +962,7 @@ class CombinedParserGUI(RunnerMixin):
         config['use_zap'] = bool(self.use_zap.get())
         config['zap_api_key'] = self.zap_api_key.get().strip()
         config['auto_start_zap_daemon'] = bool(self.auto_start_zap_daemon.get())
+        config['auto_install_security_tools'] = bool(config.get("auto_install_security_tools", False))
         config['proxy_rotation'] = bool(self.proxy_rotation.get())
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
@@ -2225,3 +2236,23 @@ class CombinedParserGUI(RunnerMixin):
                 self.active_run_context["extract_ms_values"] = run_extract_ms_values if "run_extract_ms_values" in locals() else []
             self._finalize_active_run()
             self.cleanup_after_pipeline(f"Pipeline failed: {str(e)}")
+    def on_run_burp_workflow(self):
+        rows = list((self.processed_data or {}).values())
+        ok, msg = run_burp_with_project(rows, auto_install=bool(config.get("auto_install_security_tools", False)))
+        self._write_log_threadsafe(msg)
+        if ok:
+            self.status_text.set("Burp workflow started")
+
+    def on_run_zap_workflow(self):
+        rows = list((self.processed_data or {}).values())
+        ok, msg = run_zap_active_scan(
+            rows,
+            proxy_url=config.get("zap_proxy", "http://127.0.0.1:8080"),
+            api_key=config.get("zap_api_key", ""),
+            auto_install=bool(config.get("auto_install_security_tools", False)),
+        )
+        self._write_log_threadsafe(msg)
+        if ok:
+            self.status_text.set("ZAP active scan queued")
+
+
