@@ -23,7 +23,7 @@ from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, d
 from extract import extract_login_form, test_credentials_for_site
 from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
 from zap import import_data_to_zap, launch_zap, run_zap_active_scan
-from install import ensure_burp_installed, ensure_zap_installed
+from install_tools import install_burp, install_hydra, install_zap
 from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
 from runner import RunnerMixin
 from proxies import ProxyManager
@@ -194,8 +194,8 @@ class CombinedParserGUI(RunnerMixin):
                     issues.append("Chromedriver path not initialized at startup")
 
                 if bool(config.get("auto_install_security_tools", False)):
-                    burp_state = ensure_burp_installed(auto_install=True)
-                    zap_state = ensure_zap_installed(auto_install=True)
+                    burp_state = install_burp()
+                    zap_state = install_zap()
                     self._write_log_threadsafe(f"Burp check: {burp_state.get('message', burp_state.get('path', 'not found'))}")
                     self._write_log_threadsafe(f"ZAP check: {zap_state.get('message', zap_state.get('path', 'not found'))}")
 
@@ -540,6 +540,9 @@ class CombinedParserGUI(RunnerMixin):
         zap_tab = ttk.Frame(notebook)
         notebook.add(zap_tab, text="ZAP Tester")
 
+        tools_tab = ttk.Frame(notebook)
+        notebook.add(tools_tab, text="Tools")
+
         troubleshooting_tab = ttk.Frame(notebook)
         notebook.add(troubleshooting_tab, text="Troubleshooting")
 
@@ -550,6 +553,7 @@ class CombinedParserGUI(RunnerMixin):
         self.build_runner_tab(runner_tab)
         self.build_burp_tab(burp_tab)
         self.build_zap_tab(zap_tab)
+        self.build_tools_tab(tools_tab)
         self.build_troubleshooting_tab(troubleshooting_tab)
         self.build_timeline_tab(timeline_tab)
 
@@ -864,6 +868,41 @@ class CombinedParserGUI(RunnerMixin):
         action_row = ttk.Frame(content)
         action_row.pack(fill="x", padx=6, pady=(12, 8))
         ttk.Button(action_row, text="Save & Close", command=self.save_settings).pack(side="right")
+
+    def build_tools_tab(self, tab):
+        frame = ttk.Frame(tab, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Dependency Installer", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
+        checks = ttk.Frame(frame)
+        checks.pack(anchor="w", fill="x", pady=(0, 8))
+        self.install_hydra_var = tk.BooleanVar(value=True)
+        self.install_zap_var = tk.BooleanVar(value=True)
+        self.install_burp_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(checks, text="Hydra", variable=self.install_hydra_var).pack(anchor="w")
+        ttk.Checkbutton(checks, text="OWASP ZAP", variable=self.install_zap_var).pack(anchor="w")
+        ttk.Checkbutton(checks, text="Burp Community", variable=self.install_burp_var).pack(anchor="w")
+        self.install_progress = ttk.Progressbar(frame, mode="determinate", maximum=3)
+        self.install_progress.pack(fill="x", pady=(0, 8))
+        ttk.Button(frame, text="Install Selected Tools", command=self.install_selected_tools).pack(anchor="w", pady=(0, 8))
+        self.install_log = tk.Text(frame, height=16, wrap="word")
+        self.install_log.pack(fill="both", expand=True)
+
+    def install_selected_tools(self):
+        tasks = []
+        if self.install_hydra_var.get():
+            tasks.append(("Hydra", install_hydra))
+        if self.install_zap_var.get():
+            tasks.append(("ZAP", install_zap))
+        if self.install_burp_var.get():
+            tasks.append(("Burp", install_burp))
+        self.install_progress.configure(maximum=max(len(tasks), 1), value=0)
+        for index, (name, fn) in enumerate(tasks, start=1):
+            state = fn(log_func=self._write_log_threadsafe)
+            line = f"[{name}] {state.get('message', state)}\n"
+            self.install_log.insert(tk.END, line)
+            self.install_log.see(tk.END)
+            self.install_progress.configure(value=index)
+        ensure_hydra_available(log_func=self._write_log_threadsafe)
 
     def build_burp_tab(self, tab):
         frame = ttk.Frame(tab, padding=12)

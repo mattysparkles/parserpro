@@ -16,6 +16,63 @@ from burp import run_burp_with_project
 from zap import run_zap_active_scan
 
 
+
+class ToolRunner:
+    def __init__(self, name: str):
+        self.name = name
+        self.process = None
+        self.status = "idle"
+        self.log_lines = []
+
+    def start(self):
+        raise NotImplementedError
+
+    def stop(self):
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+        self.status = "stopped"
+
+    def get_status(self):
+        return self.status
+
+    def get_log(self):
+        return "".join(self.log_lines)
+
+
+class HydraRunner(ToolRunner):
+    def __init__(self, command, **popen_kwargs):
+        super().__init__("hydra")
+        self.command = command
+        self.popen_kwargs = popen_kwargs
+
+    def start(self):
+        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **self.popen_kwargs)
+        self.status = "running"
+        return self.process
+
+
+class ZapRunner(ToolRunner):
+    def __init__(self, command):
+        super().__init__("zap")
+        self.command = command
+
+    def start(self):
+        self.process = subprocess.Popen(self.command)
+        self.status = "running"
+        return self.process
+
+
+class BurpRunner(ToolRunner):
+    def __init__(self, command):
+        super().__init__("burp")
+        self.command = command
+
+    def start(self):
+        self.process = subprocess.Popen(self.command)
+        self.status = "running"
+        return self.process
+
+
 class RunnerMixin:
     HIT_RE = re.compile(r"login:\s*(?P<username>\S+)\s+password:\s*(?P<password>\S+)", re.IGNORECASE)
 
@@ -94,6 +151,11 @@ class RunnerMixin:
         ttk.Button(btn_frame, text="Invert Selection (Filtered)", command=self.invert_selection_filtered).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Pause/Resume", command=self.toggle_pause).pack(side="right", padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.cancel_pipeline).pack(side="right", padx=(16, 4))
+
+        self.hydra_missing_frame = ttk.Frame(log_section)
+        self.hydra_missing_label = ttk.Label(self.hydra_missing_frame, text="Hydra not detected — Install now?")
+        self.hydra_missing_label.pack(side="left", padx=(0, 8))
+        ttk.Button(self.hydra_missing_frame, text="Install Hydra", command=self.install_hydra_from_runner).pack(side="left")
 
         self.hydra_log = tk.Text(log_section, height=12, wrap="none", font=("Consolas", 10), padx=8, pady=8)
         self.hydra_log.grid(row=1, column=0, sticky="nsew")
@@ -288,6 +350,13 @@ class RunnerMixin:
 
     def _get_selected_sites(self):
         return [row["site"] for row in self.runner_rows_all if row.get("selected")]
+
+    def install_hydra_from_runner(self):
+        from install_tools import install_hydra
+        state = install_hydra(log_func=self._write_log_threadsafe)
+        self._write_log_threadsafe(state.get("message", "Hydra install attempted"))
+        ensure_hydra_available(log_func=self._write_log_threadsafe)
+        self.refresh_runner_controls_state()
 
     def run_selected_hydra(self):
         if not config.get("runner_enabled", True):
@@ -495,7 +564,7 @@ class RunnerMixin:
                         bufsize=1,
                     )
                 else:
-                    split_cmd = shlex.split(cmd)
+                    split_cmd = shlex.split(cmd, posix=(os.name != "nt"))
                     completed = subprocess.run(
                         split_cmd,
                         capture_output=True,
