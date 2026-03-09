@@ -530,3 +530,12 @@ python -m unittest discover -s tests -p 'test_*.py'
 - For complex session workflows (CAPTCHA/multi-step), export payloads and continue with Burp Intruder (`data/burp_intruder_payloads.xml`) or OWASP ZAP scripts.
 - For hardest flows, pair outputs with a custom Selenium/Playwright script for stateful session handling.
 
+
+
+## New extraction + tooling upgrades
+
+- Added automatic Cloudflare fallback: requests fetch now retries with `cloudscraper` on HTTP 403, using rotating User-Agent headers.
+- Added advanced extraction mode improvements for JS-heavy logins (keyword-driven login-link following + password/action XPath heuristics).
+- Added optional startup auto-install checks for OWASP ZAP and Burp Community (downloads staged under `tools/` and paths persisted in config).
+- Added Burp/ZAP workflow launch helpers from the GUI and runner mixin for quick payload generation and active-scan bootstrapping.
+- Improved operational stats messaging in extraction flow (forms-found percentage) and graceful interruption handling with subprocess cleanup.
