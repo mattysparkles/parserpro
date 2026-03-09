@@ -340,7 +340,73 @@ def _fetch_html_for_mode(url, proxy, mode):
         last_error = error
     return None, last_error, used_playwright
 
-def extract_login_form(url, proxy=None, strict_validation=True, mode="static", observation_options=None):
+
+
+def _discover_login_targets_playwright(start_url, proxy=None, max_hops=3):
+    """Advanced mode: discover hidden/non-obvious login paths via rendered DOM and keyword links."""
+    if not HAS_PLAYWRIGHT:
+        return []
+
+    targets = []
+    seen = set()
+    launch_args = {"headless": True}
+    try:
+        effective_proxy = get_intercept_proxy(config, proxy)
+    except RuntimeError:
+        effective_proxy = None
+    if effective_proxy and effective_proxy.get("server"):
+        launch_args["proxy"] = {"server": effective_proxy["server"]}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**launch_args)
+        ctx = browser.new_context(ignore_https_errors=bool(config.get("ignore_https_errors", False)))
+        page = ctx.new_page()
+        queue = [start_url]
+        while queue and len(targets) < max_hops:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            try:
+                page.goto(current, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(1200)
+            except Exception:
+                continue
+
+            has_password = page.locator("xpath=//input[@type='password']").count() > 0
+            has_login_action = page.locator("xpath=//*[contains(translate(@action,'LOGIN','login'),'login')]").count() > 0
+            if has_password or has_login_action:
+                targets.append(current)
+
+            link_handles = page.locator("a").element_handles()
+            for handle in link_handles:
+                if len(queue) + len(targets) >= max_hops:
+                    break
+                try:
+                    href = handle.get_attribute("href") or ""
+                    text = (handle.inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                blob = f"{text} {href}".lower()
+                if not any(k in blob for k in ("login", "log in", "signin", "sign-in", "auth", "account")):
+                    continue
+                candidate = validate_url(urljoin(current, href))
+                if candidate and candidate not in seen and candidate not in queue:
+                    queue.append(candidate)
+        browser.close()
+
+    return targets
+
+
+def _extract_nonstandard_fields(soup):
+    """Extract user/password fields using broader CSS heuristics for tricky forms."""
+    password = soup.select_one("input[type='password'], input[name*='pass' i], input[id*='pass' i]")
+    username = soup.select_one(
+        "input[type='email'], input[name*='user' i], input[name*='email' i], input[id*='user' i], input[id*='email' i], input[type='text']"
+    )
+    return username, password
+
+def extract_login_form(url, proxy=None, strict_validation=True, mode="static", advanced_mode=False, observation_options=None):
     if not HAS_BS4:
         return None, "bs4_not_installed"
 
@@ -372,6 +438,25 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
 
     best_candidate = extract_loginish_metadata(soup, url)
     checked_urls = [url]
+
+    if advanced_mode and not best_candidate:
+        advanced_targets = _discover_login_targets_playwright(url, proxy=proxy, max_hops=3)
+        for adv_url in advanced_targets:
+            if adv_url in checked_urls:
+                continue
+            checked_urls.append(adv_url)
+            html_adv, _, used_pw_adv = _fetch_html_for_mode(adv_url, proxy, "playwright")
+            used_playwright = used_playwright or used_pw_adv
+            if not html_adv:
+                continue
+            soup_adv = BeautifulSoup(html_adv, "html.parser")
+            candidate = extract_loginish_metadata(soup_adv, adv_url)
+            if candidate:
+                soup = soup_adv
+                best_candidate = candidate
+                url = adv_url
+                break
+
     if not best_candidate:
         base = get_base_url(url) or url.rstrip('/')
         extra_urls = [f"{base.rstrip('/')}{p}" for p in COMMON_LOGIN_PATHS[:5]]
@@ -428,6 +513,15 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", o
         v = h.get("value", "")
         if n:
             post_parts.append(f"{n}={v}")
+
+    if advanced_mode and (not username_field or not password_field):
+        guessed_user, guessed_pass = _extract_nonstandard_fields(soup)
+        if guessed_user and not username_field and guessed_user.get("name"):
+            username_field = guessed_user.get("name")
+            post_parts.append(f"{username_field}=^USER^")
+        if guessed_pass and not password_field and guessed_pass.get("name"):
+            password_field = guessed_pass.get("name")
+            post_parts.append(f"{password_field}=^PASS^")
 
     submit_mode = best_candidate["submit_mode"]
     failure = detect_failure_string(soup, url)
@@ -525,7 +619,10 @@ def test_credentials_for_site(site_result, combos, proxy=None):
     if not (action_url and user_field and pass_field):
         return {"status": "insufficient_form_data", "hits": 0}
 
-    effective_proxy = get_intercept_proxy(config, proxy)
+    try:
+        effective_proxy = get_intercept_proxy(config, proxy)
+    except RuntimeError:
+        effective_proxy = None
     hits = []
 
     def _attempt_with_playwright(username, password):

@@ -164,6 +164,7 @@ def load_config():
     loaded.setdefault("analysis_mode", "static")
     loaded.setdefault("use_playwright_dynamic", False)
     loaded.setdefault("enable_cloudscraper_fallback", True)
+    loaded.setdefault("advanced_extraction_mode", False)
     loaded.setdefault("observation_enable_dummy_interaction", False)
     loaded.setdefault("observation_allowlisted_domains", [])
     loaded.setdefault("startup_dependency_checks", True)

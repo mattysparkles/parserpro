@@ -287,7 +287,11 @@ def main() -> None:
     if args.headless:
         if not args.extract or not args.forms_output:
             raise SystemExit("--headless requires --extract and --forms-output")
-        raise SystemExit(run_headless_extract(Path(args.extract), Path(args.forms_output), args.run_hydra))
+        try:
+            raise SystemExit(run_headless_extract(Path(args.extract), Path(args.forms_output), args.run_hydra))
+        except KeyboardInterrupt:
+            logging.info("KeyboardInterrupt received during headless run, exiting gracefully")
+            raise SystemExit(130)
 
     root = tk.Tk()
     CombinedParserGUI(root)

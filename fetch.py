@@ -15,6 +15,24 @@ from app_logging import logger, log_once
 from config import config, get_intercept_proxy
 from helpers import USER_AGENTS, normalize_and_validate_target
 
+
+# Dedicated request/browser UA pool used for per-request rotation.
+FETCH_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.127 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.6; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.141 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/127.0.2651.74 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+]
+
+
+def _pick_user_agent() -> str:
+    pool = FETCH_USER_AGENTS or USER_AGENTS
+    return random.choice(pool)
+
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -138,7 +156,7 @@ def _fetch_page_playwright_once(clean_url, effective_proxy):
         browser = p.chromium.launch(**launch_args)
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
-            user_agent=random.choice(USER_AGENTS),
+            user_agent=_pick_user_agent(),
             locale="en-US",
             ignore_https_errors=bool(config.get("ignore_https_errors", False)),
             java_script_enabled=True,
@@ -246,7 +264,7 @@ def fetch_page_selenium(url, proxy=None):
             options = Options()
             options.add_argument("--headless")
             options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+            options.add_argument(f"user-agent={_pick_user_agent()}")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             if current_proxy and current_proxy.get("server"):
@@ -323,7 +341,7 @@ def fetch_page_requests(url, proxy=None, timeout=20):
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    headers = {"User-Agent": _pick_user_agent()}
     proxies = None
     if effective_proxy and effective_proxy.get("server"):
         server = effective_proxy["server"]
@@ -333,6 +351,7 @@ def fetch_page_requests(url, proxy=None, timeout=20):
         resp = requests.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
         if resp.status_code == 403 and HAS_CLOUDSCRAPER and bool(config.get("enable_cloudscraper_fallback", True)):
             try:
+                logger.info(f"[cloudscraper] 403 from {clean_url}; retrying with cloudscraper")
                 scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
                 resp = scraper.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
             except Exception as cloud_exc:
