@@ -9,6 +9,8 @@ import sys
 import threading
 import webbrowser
 import warnings
+
+import requests
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from extract import extract_login_form
 from fetch import HAS_DEATHBYCAPTCHA
 from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
 from gui import CombinedParserGUI
+from logging import write_detailed, write_privacy
 
 warnings.simplefilter("ignore", InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -76,24 +79,22 @@ def ensure_playwright_chromium_once() -> tuple[bool, str]:
     if marker.exists():
         return True, "playwright chromium already initialized"
 
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-        if result.returncode == 0:
-            marker.write_text(datetime.now().isoformat(), encoding="utf-8")
-            logging.info("[Startup] Playwright Chromium installed/verified")
-            return True, "playwright chromium ready"
-        err = (result.stderr or result.stdout or "unknown error").strip()
-        logging.warning("[Startup] Playwright install warning: %s", err)
-        return False, f"playwright install failed: {err}"
-    except Exception as exc:
-        logging.warning("[Startup] Playwright install failed: %s", exc)
-        return False, f"playwright install failed: {exc}"
+    commands = [["playwright", "install", "chromium"], [sys.executable, "-m", "playwright", "install", "chromium"]]
+    last_err = ""
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
+            if result.returncode == 0:
+                marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+                logging.info("[Startup] Playwright Chromium installed/verified")
+                write_detailed("Playwright chromium check passed")
+                write_privacy("Playwright chromium check passed")
+                return True, "playwright chromium ready"
+            last_err = (result.stderr or result.stdout or "unknown error").strip()
+        except Exception as exc:
+            last_err = str(exc)
+    logging.warning("[Startup] Playwright install warning: %s", last_err)
+    return False, f"playwright install failed: {last_err}"
 
 
 def apply_startup_proxy_fallback() -> tuple[bool, str]:
@@ -101,14 +102,20 @@ def apply_startup_proxy_fallback() -> tuple[bool, str]:
     if not proxy_cfg:
         return True, "no startup proxy configured"
 
-    if proxy_is_reachable(proxy_cfg, timeout=2.0):
-        return True, f"proxy reachable: {proxy_cfg.get('server')}"
-
-    config["proxy_url"] = ""
-    save_config()
-    warning = f"SOCKS/HTTP proxy unreachable at startup ({proxy_cfg.get('server')}); using direct connection"
-    logging.warning("[Startup] %s", warning)
-    return False, warning
+    server = proxy_cfg.get("server", "")
+    try:
+        requests.get("https://httpbin.org/ip", proxies={"http": server, "https": server}, timeout=5, verify=False)
+        write_detailed(f"Proxy startup test passed: {server}")
+        write_privacy(f"Proxy startup test passed: {server}")
+        return True, f"proxy reachable: {server}"
+    except Exception as exc:
+        config["proxy_url"] = ""
+        save_config()
+        warning = "Proxy unreachable — running direct. Check NordVPN/GOST."
+        logging.warning("[Startup] %s (%s)", warning, exc)
+        write_detailed(f"Proxy startup test failed {server}: {exc}", level="WARN")
+        write_privacy(f"Proxy startup test failed {server}: {exc}", level="WARN")
+        return False, warning
 
 if sys.platform == "win32":
     try:
@@ -179,6 +186,8 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
         _log_note(notes, f"Proxy check: {proxy_msg}", logger)
     else:
         notes.append(proxy_msg)
+        if show_dialogs and not logger:
+            messagebox.showwarning("Proxy", "Proxy unreachable — running direct. Check NordVPN/GOST.")
 
     playwright_ok, playwright_msg = ensure_playwright_chromium_once()
     if playwright_ok:
@@ -255,37 +264,19 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
 
     forms_output.parent.mkdir(parents=True, exist_ok=True)
     with forms_output.open("w", newline="", encoding="utf-8") as handle:
+        base_fields = [
+            "original_url", "base_url", "used_url", "used_type", "action", "post_data", "failure_condition",
+            "hydra_command_template", "combo_file", "full_hydra_command", "confidence", "validation_reason",
+            "method", "method_warning", "status", "fallback_used", "playwright_used", "checked_urls", "action_url",
+            "user_field", "pass_field", "submit_mode", "reasons", "classification", "custom_tester_required", "login_metadata", "observed_login_flow"
+        ]
+        dynamic_fields = set(base_fields)
+        for row in forms:
+            dynamic_fields.update((row or {}).keys())
+        fieldnames = base_fields + sorted(k for k in dynamic_fields if k not in base_fields)
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "original_url",
-                "base_url",
-                "used_url",
-                "used_type",
-                "action",
-                "post_data",
-                "failure_condition",
-                "hydra_command_template",
-                "combo_file",
-                "full_hydra_command",
-                "confidence",
-                "validation_reason",
-                "method",
-                "method_warning",
-                "status",
-                "fallback_used",
-                "playwright_used",
-                "checked_urls",
-                "action_url",
-                "user_field",
-                "pass_field",
-                "submit_mode",
-                "reasons",
-                "classification",
-                "custom_tester_required",
-                "login_metadata",
-                "observed_login_flow",
-            ],
+            fieldnames=fieldnames,
             extrasaction="ignore",
         )
         writer.writeheader()

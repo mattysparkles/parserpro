@@ -14,6 +14,7 @@ except ImportError:
 from app_logging import logger, log_once
 from config import config, get_intercept_proxy
 from helpers import USER_AGENTS, normalize_and_validate_target
+from logging import write_detailed, write_privacy
 
 
 # Dedicated request/browser UA pool used for per-request rotation.
@@ -116,6 +117,23 @@ def short_error_detail(exc_text: str, max_len=220):
     return detail[:max_len]
 
 
+
+
+def test_proxy_connection(proxy_cfg) -> bool:
+    if not (HAS_REQUESTS and proxy_cfg and proxy_cfg.get("server")):
+        return False
+    server = proxy_cfg["server"]
+    try:
+        write_detailed(f"Proxy test attempt: {server}")
+        write_privacy(f"Proxy test attempt: {server}")
+        requests.get("https://httpbin.org/ip", proxies={"http": server, "https": server}, timeout=5, verify=False)
+        return True
+    except Exception as exc:
+        write_detailed(f"Proxy unreachable {server}: {exc}", level="WARN")
+        write_privacy(f"Proxy unreachable {server}: {exc}", level="WARN")
+        return False
+
+
 def build_error_payload(code, hint, detail, stacktrace=None):
     payload = {"code": code, "hint": hint, "detail": short_error_detail(detail)}
     if stacktrace:
@@ -166,7 +184,7 @@ def _fetch_page_playwright_once(clean_url, effective_proxy):
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         page = context.new_page()
-        page.goto(clean_url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(clean_url, wait_until="domcontentloaded", timeout=180000)
         page.wait_for_timeout(4000)
         html = page.content()
         browser.close()
@@ -190,6 +208,9 @@ def fetch_page_playwright(url, proxy=None):
     attempts = 0
     while attempts < 2:
         attempts += 1
+        route = "proxy" if effective_proxy else "direct"
+        write_detailed(f"Playwright fetch attempt {attempts} via {route}: {clean_url}")
+        write_privacy(f"Playwright fetch attempt {attempts} via {route}: {clean_url}")
         try:
             return _fetch_page_playwright_once(clean_url, effective_proxy), None
         except Exception as e:
@@ -268,6 +289,9 @@ def fetch_page_selenium(url, proxy=None):
     while attempts < 2:
         attempts += 1
         driver = None
+        route = "proxy" if current_proxy else "direct"
+        write_detailed(f"Selenium fetch attempt {attempts} via {route}: {clean_url}")
+        write_privacy(f"Selenium fetch attempt {attempts} via {route}: {clean_url}")
         try:
             options = Options()
             options.add_argument("--headless")
@@ -289,7 +313,7 @@ def fetch_page_selenium(url, proxy=None):
                 driver = webdriver.Chrome(options=options)
 
             # Prevent edge-case pages from blocking extraction indefinitely.
-            driver.set_page_load_timeout(35)
+            driver.set_page_load_timeout(180)
 
             driver.get(clean_url)
             time.sleep(5)
@@ -336,7 +360,7 @@ def fetch_page_selenium(url, proxy=None):
 
 
 
-def fetch_page_requests(url, proxy=None, timeout=20):
+def fetch_page_requests(url, proxy=None, timeout=45):
     if not HAS_REQUESTS:
         return None, build_error_payload("fetch_failed", "requests not installed", "requests dependency missing")
 
@@ -350,30 +374,46 @@ def fetch_page_requests(url, proxy=None, timeout=20):
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
     headers = {"User-Agent": _pick_user_agent()}
-    proxies = None
+    proxy_map = None
     if effective_proxy and effective_proxy.get("server"):
         server = effective_proxy["server"]
-        proxies = {"http": server, "https": server}
+        proxy_map = {"http": server, "https": server}
 
-    try:
-        resp = requests.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
-        if resp.status_code == 403 and HAS_CLOUDSCRAPER and bool(config.get("enable_cloudscraper_fallback", True)):
-            try:
-                logger.info(f"[cloudscraper] 403 from {clean_url}; retrying with cloudscraper")
-                scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-                resp = scraper.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=proxies, allow_redirects=True)
-            except Exception as cloud_exc:
-                stack = _debug_stack(f"Cloudscraper failed {clean_url}", cloud_exc)
-                return None, build_error_payload("fetch_failed", "cloudscraper failed", str(cloud_exc), stacktrace=stack)
-        if resp.status_code >= 400:
-            return None, build_error_payload("http_error", f"HTTP {resp.status_code}", f"{clean_url} returned {resp.status_code}")
-        return resp.text, None
-    except requests.exceptions.Timeout as e:
-        return None, build_error_payload("fetch_timeout", "request timed out", str(e))
-    except requests.exceptions.RequestException as e:
-        stack = _debug_stack(f"Requests failed {clean_url}", e)
-        code, hint = classify_nav_error(str(e))
-        return None, build_error_payload(code, hint, str(e), stacktrace=stack)
+    attempts = [proxy_map, None] if proxy_map else [None]
+    for idx, attempt_proxy in enumerate(attempts[:2], start=1):
+        route = "proxy" if attempt_proxy else "direct"
+        write_detailed(f"Requests fetch attempt {idx} via {route}: {clean_url}")
+        write_privacy(f"Requests fetch attempt {idx} via {route}: {clean_url}")
+        try:
+            resp = requests.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=attempt_proxy, allow_redirects=True)
+            if resp.status_code == 403 and HAS_CLOUDSCRAPER and bool(config.get("enable_cloudscraper_fallback", True)):
+                try:
+                    logger.info(f"[cloudscraper] 403 from {clean_url}; retrying with cloudscraper")
+                    scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+                    resp = scraper.get(clean_url, headers=headers, timeout=timeout, verify=False, proxies=attempt_proxy, allow_redirects=True)
+                except Exception as cloud_exc:
+                    stack = _debug_stack(f"Cloudscraper failed {clean_url}", cloud_exc)
+                    return None, build_error_payload("fetch_failed", "cloudscraper failed", str(cloud_exc), stacktrace=stack)
+            if resp.status_code >= 400:
+                return None, build_error_payload("http_error", f"HTTP {resp.status_code}", f"{clean_url} returned {resp.status_code}")
+            return resp.text, None
+        except requests.exceptions.Timeout as e:
+            write_detailed(f"Timeout via {route}: {clean_url} :: {e}", level="WARN")
+            write_privacy(f"Timeout via {route}: {clean_url} :: {e}", level="WARN")
+            if idx < len(attempts):
+                continue
+            return None, build_error_payload("fetch_timeout", "request timed out", str(e))
+        except requests.exceptions.RequestException as e:
+            write_detailed(f"Request failure via {route}: {clean_url} :: {e}", level="WARN")
+            write_privacy(f"Request failure via {route}: {clean_url} :: {e}", level="WARN")
+            if idx < len(attempts):
+                continue
+            stack = _debug_stack(f"Requests failed {clean_url}", e)
+            code, hint = classify_nav_error(str(e))
+            return None, build_error_payload(code, hint, str(e), stacktrace=stack)
+
+    return None, build_error_payload("fetch_failed", "request failed", "all attempts exhausted")
+
 
 def _solve_with_anticaptcha(captcha_type, sitekey, url):
     if not HAS_ANTICAPTCHA or not config.get("anticaptcha_key"):
