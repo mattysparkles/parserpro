@@ -912,7 +912,9 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(checks, text="OWASP ZAP", variable=self.install_zap_var).pack(anchor="w")
         ttk.Checkbutton(checks, text="Burp Community", variable=self.install_burp_var).pack(anchor="w")
         self.install_progress = ttk.Progressbar(frame, mode="determinate", maximum=3)
-        self.install_progress.pack(fill="x", pady=(0, 8))
+        self.install_progress.pack(fill="x", pady=(0, 4))
+        self.install_status_label = ttk.Label(frame, text="Installer status: idle")
+        self.install_status_label.pack(anchor="w", pady=(0, 8))
         btns = ttk.Frame(frame)
         btns.pack(anchor="w", pady=(0, 8))
         ttk.Button(btns, text="Install Selected Tools", command=self.install_selected_tools).pack(side="left")
@@ -952,12 +954,18 @@ class CombinedParserGUI(RunnerMixin):
         if self.install_burp_var.get():
             tasks.append(("Burp", install_burp))
         self.install_progress.configure(maximum=max(len(tasks), 1), value=0)
+        if not tasks:
+            self.install_status_label.config(text="Installer status: no tools selected")
+            return
         for index, (name, fn) in enumerate(tasks, start=1):
+            self.install_status_label.config(text=f"Installer status: installing {name} ({index}/{len(tasks)})")
+            self.root.update_idletasks()
             state = fn(log_func=self._write_log_threadsafe)
             line = f"[{name}] {state.get('message', state)}\n"
             self.install_log.insert(tk.END, line)
             self.install_log.see(tk.END)
             self.install_progress.configure(value=index)
+        self.install_status_label.config(text="Installer status: complete")
         force_retry_hydra(log_func=self._write_log_threadsafe)
         self.update_tool_status_labels()
 
