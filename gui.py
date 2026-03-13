@@ -2171,9 +2171,14 @@ class CombinedParserGUI(RunnerMixin):
                 forms_found_count = 0
                 total = len(site_list)
                 rotation_counter = 0
+                task_started_at = {}
+                task_started_lock = threading.Lock()
 
                 def extract_for_site(base):
                     nonlocal rotation_counter
+                    with task_started_lock:
+                        task_started_at[base] = time.monotonic()
+
                     if self.cancel_event.is_set():
                         return None
 
@@ -2225,7 +2230,6 @@ class CombinedParserGUI(RunnerMixin):
                 executor = ThreadPoolExecutor(max_workers=self.threads.get())
                 try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
-                    future_started_at = {future: time.monotonic() for future in future_to_base}
                     pending = set(future_to_base)
                     i = 0
                     while pending:
@@ -2239,7 +2243,12 @@ class CombinedParserGUI(RunnerMixin):
                         now_mono = time.monotonic()
                         timed_out = []
                         for future in list(pending):
-                            if now_mono - future_started_at.get(future, now_mono) >= timeout_seconds:
+                            base = future_to_base[future]
+                            with task_started_lock:
+                                started_at = task_started_at.get(base)
+                            if started_at is None:
+                                continue
+                            if now_mono - started_at >= timeout_seconds:
                                 timed_out.append(future)
                                 pending.discard(future)
 
@@ -2268,6 +2277,10 @@ class CombinedParserGUI(RunnerMixin):
                             self._update_status_threadsafe(f"Extracting: {i}/{total} | forms found {forms_found_count}/{i} ({percent:.1f}%)")
 
                         for future in done:
+                            base = future_to_base[future]
+                            with task_started_lock:
+                                task_started_at.pop(base, None)
+
                             i += 1
                             if self.cancel_event.is_set():
                                 if self.active_run_context is not None:
@@ -2287,7 +2300,6 @@ class CombinedParserGUI(RunnerMixin):
                                 self.cleanup_after_pipeline("Cancelled while paused")
                                 return
 
-                            base = future_to_base[future]
                             entry = self.processed_data.setdefault(base, {})
                             now = datetime.now().isoformat()
                             entry.setdefault("first_seen_ts", now)
