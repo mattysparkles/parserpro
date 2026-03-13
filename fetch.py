@@ -1,4 +1,6 @@
 import random
+import subprocess
+import sys
 import time
 import traceback
 
@@ -93,6 +95,45 @@ except ImportError:
 
 
 _CHROMEDRIVER_STATUS_CACHE = None
+_PROXY_STARTUP_TESTED = False
+_PROXY_STARTUP_OK = True
+PLAYWRIGHT_TIMEOUT_MS = 300000  # FIXED: per-site timeout 5 minutes
+REQUEST_TIMEOUT_SECONDS = 300  # FIXED: per-site timeout 5 minutes
+SITE_FETCH_RETRIES = 2  # FIXED: 2 retries + initial attempt
+_PLAYWRIGHT_RUNTIME_READY = False
+
+
+def ensure_playwright_runtime_once() -> tuple[bool, str]:
+    # FIXED: auto-install chromium on first runtime use if missing
+    global _PLAYWRIGHT_RUNTIME_READY
+    if _PLAYWRIGHT_RUNTIME_READY:
+        return True, "playwright_runtime_ready"
+    if not HAS_PLAYWRIGHT:
+        return False, "playwright_not_installed"
+    commands = [["playwright", "install", "chromium"], [sys.executable, "-m", "playwright", "install", "chromium"]]
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
+            if result.returncode == 0:
+                _PLAYWRIGHT_RUNTIME_READY = True
+                return True, "playwright_chromium_ready"
+        except Exception:
+            continue
+    return False, "playwright_install_failed"
+
+
+def _proxy_or_none(effective_proxy):
+    # FIXED: startup proxy probe once; disable proxy if unreachable
+    global _PROXY_STARTUP_TESTED, _PROXY_STARTUP_OK
+    if not effective_proxy or not effective_proxy.get("server"):
+        return effective_proxy
+    if not _PROXY_STARTUP_TESTED:
+        _PROXY_STARTUP_TESTED = True
+        _PROXY_STARTUP_OK = test_proxy_connection(effective_proxy)
+        if not _PROXY_STARTUP_OK:
+            write_detailed("[Proxy Fallback] Startup proxy probe failed; using direct connection", level="WARN")
+            write_privacy("[Proxy Fallback] Startup proxy probe failed; using direct connection", level="WARN")
+    return effective_proxy if _PROXY_STARTUP_OK else None
 
 ERROR_CODE_MAP = {
     "ERR_NAME_NOT_RESOLVED": ("dns_failed", "DNS resolution failed"),
@@ -184,7 +225,7 @@ def _fetch_page_playwright_once(clean_url, effective_proxy):
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         page = context.new_page()
-        page.goto(clean_url, wait_until="domcontentloaded", timeout=180000)
+        page.goto(clean_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
         page.wait_for_timeout(4000)
         html = page.content()
         browser.close()
@@ -192,21 +233,23 @@ def _fetch_page_playwright_once(clean_url, effective_proxy):
 
 
 def fetch_page_playwright(url, proxy=None):
-    if not HAS_PLAYWRIGHT:
-        return None, "playwright_not_installed"
+    ready, ready_msg = ensure_playwright_runtime_once()
+    if not ready:
+        return None, ready_msg
 
     clean_url, reason = normalize_and_validate_target(url, allow_nonstandard_ports=bool(config.get("allow_nonstandard_ports", False)))
     if not clean_url:
         return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
-        effective_proxy = get_intercept_proxy(config, proxy)
+        effective_proxy = _proxy_or_none(get_intercept_proxy(config, proxy))
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
     retried_without_proxy = False
     attempts = 0
-    while attempts < 2:
+    max_attempts = SITE_FETCH_RETRIES + 1
+    while attempts < max_attempts:
         attempts += 1
         route = "proxy" if effective_proxy else "direct"
         write_detailed(f"Playwright fetch attempt {attempts} via {route}: {clean_url}")
@@ -231,8 +274,9 @@ def fetch_page_playwright(url, proxy=None):
                 retried_without_proxy = True
                 continue
 
-            if code == "conn_closed" and attempts < 2:
-                time.sleep(1.0)
+            if attempts < max_attempts:
+                backoff = 2 ** (attempts - 1)
+                time.sleep(backoff)
                 continue
 
             if code == "dns_failed":
@@ -277,7 +321,7 @@ def fetch_page_selenium(url, proxy=None):
         return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
-        effective_proxy = get_intercept_proxy(config, proxy)
+        effective_proxy = _proxy_or_none(get_intercept_proxy(config, proxy))
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
@@ -286,7 +330,8 @@ def fetch_page_selenium(url, proxy=None):
     retried_without_proxy = False
     current_proxy = effective_proxy
     attempts = 0
-    while attempts < 2:
+    max_attempts = SITE_FETCH_RETRIES + 1
+    while attempts < max_attempts:
         attempts += 1
         driver = None
         route = "proxy" if current_proxy else "direct"
@@ -360,7 +405,7 @@ def fetch_page_selenium(url, proxy=None):
 
 
 
-def fetch_page_requests(url, proxy=None, timeout=45):
+def fetch_page_requests(url, proxy=None, timeout=REQUEST_TIMEOUT_SECONDS):
     if not HAS_REQUESTS:
         return None, build_error_payload("fetch_failed", "requests not installed", "requests dependency missing")
 
@@ -369,7 +414,7 @@ def fetch_page_requests(url, proxy=None, timeout=45):
         return None, build_error_payload("invalid_target", reason or "invalid target", reason or "invalid target")
 
     try:
-        effective_proxy = get_intercept_proxy(config, proxy)
+        effective_proxy = _proxy_or_none(get_intercept_proxy(config, proxy))
     except RuntimeError as e:
         return None, build_error_payload("proxy_down", "SOCKS proxy unreachable", str(e))
 
@@ -379,8 +424,11 @@ def fetch_page_requests(url, proxy=None, timeout=45):
         server = effective_proxy["server"]
         proxy_map = {"http": server, "https": server}
 
-    attempts = [proxy_map, None] if proxy_map else [None]
-    for idx, attempt_proxy in enumerate(attempts[:2], start=1):
+    route_sequence = [proxy_map, None] if proxy_map else [None]
+    max_attempts = SITE_FETCH_RETRIES + 1
+    last_exc = None
+    for idx in range(1, max_attempts + 1):
+        attempt_proxy = route_sequence[min(idx - 1, len(route_sequence) - 1)]
         route = "proxy" if attempt_proxy else "direct"
         write_detailed(f"Requests fetch attempt {idx} via {route}: {clean_url}")
         write_privacy(f"Requests fetch attempt {idx} via {route}: {clean_url}")
@@ -398,20 +446,23 @@ def fetch_page_requests(url, proxy=None, timeout=45):
                 return None, build_error_payload("http_error", f"HTTP {resp.status_code}", f"{clean_url} returned {resp.status_code}")
             return resp.text, None
         except requests.exceptions.Timeout as e:
+            last_exc = e
             write_detailed(f"Timeout via {route}: {clean_url} :: {e}", level="WARN")
             write_privacy(f"Timeout via {route}: {clean_url} :: {e}", level="WARN")
-            if idx < len(attempts):
-                continue
-            return None, build_error_payload("fetch_timeout", "request timed out", str(e))
         except requests.exceptions.RequestException as e:
+            last_exc = e
             write_detailed(f"Request failure via {route}: {clean_url} :: {e}", level="WARN")
             write_privacy(f"Request failure via {route}: {clean_url} :: {e}", level="WARN")
-            if idx < len(attempts):
-                continue
-            stack = _debug_stack(f"Requests failed {clean_url}", e)
-            code, hint = classify_nav_error(str(e))
-            return None, build_error_payload(code, hint, str(e), stacktrace=stack)
 
+        if idx < max_attempts:
+            time.sleep(2 ** (idx - 1))
+
+    if isinstance(last_exc, requests.exceptions.Timeout):
+        return None, build_error_payload("fetch_timeout", "request timed out", str(last_exc))
+    if last_exc is not None:
+        stack = _debug_stack(f"Requests failed {clean_url}", last_exc)
+        code, hint = classify_nav_error(str(last_exc))
+        return None, build_error_payload(code, hint, str(last_exc), stacktrace=stack)
     return None, build_error_payload("fetch_failed", "request failed", "all attempts exhausted")
 
 

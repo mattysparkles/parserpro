@@ -556,11 +556,12 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
 
             # FIXED: Build Hydra form spec without nested quoting
             form_spec = f"{action}:{post_data}:F={failure_value}"
+            form_spec = form_spec.replace('"', "")
             print(f"[EXTRACT DEBUG] form_spec: {form_spec}")
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
-            # FIXED: No shell + no & escape + action strip + ^ dedup
-            cmd_template = f'hydra -C "{{{{combo_file}}}}" "{target}" {hydra_module} "{form_spec}" -V -t 4 -f'
+            # FIXED: Hydra v9.1+ module:// target syntax
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" {hydra_module}://"{target}" "{form_spec}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
             custom_tester_required = True
