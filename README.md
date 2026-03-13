@@ -71,7 +71,7 @@ This section explicitly lists major features available in the codebase.
 - Builds command templates for:
   - `http-post-form` when method is POST
   - `http-get-form` when method is GET
-- Emits method warnings for GET forms (manual tuning may be needed).
+- Emits method warnings for GET forms and applies a built-in Hydra GET tuning profile (`-u -I -t 2 -w 10 -f -V`).
 - Stores runnable command templates with combo placeholder replacement.
 - If no homepage form is found, extraction now checks common login paths and login-like links automatically.
 

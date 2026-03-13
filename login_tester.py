@@ -13,6 +13,15 @@ def hydra_module_for_method(method: str):
     return None
 
 
+def hydra_runtime_flags_for_method(method: str):
+    """Return sane default Hydra runtime flags per form method."""
+    m = (method or "post").lower()
+    if m == "get":
+        # GET workflows are often redirect-heavy/noisy; conservative defaults improve stability.
+        return "-u -I -t 2 -w 10 -f -V"
+    return "-t 4 -f -V"
+
+
 def save_hit(domain, username, password, method):
     safe = (domain or "unknown").replace(":", "_")
     out = HITS_DIR / f"hits_{safe}.txt"

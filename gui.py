@@ -2332,7 +2332,7 @@ class CombinedParserGUI(RunnerMixin):
                                     reason = form.get('validation_reason') or form.get('reasons') or 'ok'
                                     self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
                                     if form.get('method') == 'get':
-                                        self._write_log_threadsafe(f"{base} :: WARN GET login form detected; hydra tuning may be required")
+                                        self._write_log_threadsafe(f"{base} :: WARN GET login form detected; using built-in Hydra GET tuning profile")
                                 elif status == "skipped_invalid_target":
                                     reason = outcome.get('reason', 'invalid target')
                                     entry.update({"status": "skipped_invalid_target", "form_found": False, "last_error_code": "invalid_target", "last_error_hint": reason, "last_error_detail": reason})
@@ -2446,4 +2446,3 @@ class CombinedParserGUI(RunnerMixin):
         self._write_log_threadsafe(msg)
         if ok:
             self.status_text.set("ZAP active scan queued")
-
