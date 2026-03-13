@@ -10,10 +10,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, build_wsl_command, config, ensure_hydra_available
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, build_wsl_command, config, ensure_hydra_available, force_retry_hydra
 from helpers import get_site_filename, log_once
 from burp import run_burp_with_project
 from zap import run_zap_active_scan
+from install_tools import install_hydra
 
 
 
@@ -153,9 +154,10 @@ class RunnerMixin:
         ttk.Button(btn_frame, text="Cancel", command=self.cancel_pipeline).pack(side="right", padx=(16, 4))
 
         self.hydra_missing_frame = ttk.Frame(log_section)
-        self.hydra_missing_label = ttk.Label(self.hydra_missing_frame, text="Hydra not detected — Install now?")
+        self.hydra_missing_label = ttk.Label(self.hydra_missing_frame, text="Hydra not detected — Install or Troubleshoot?")
         self.hydra_missing_label.pack(side="left", padx=(0, 8))
-        ttk.Button(self.hydra_missing_frame, text="Install Hydra", command=self.install_hydra_from_runner).pack(side="left")
+        ttk.Button(self.hydra_missing_frame, text="Install", command=self.install_hydra_from_runner).pack(side="left")
+        ttk.Button(self.hydra_missing_frame, text="Troubleshoot", command=self.show_hydra_troubleshooting).pack(side="left", padx=(8, 0))
 
         self.hydra_log = tk.Text(log_section, height=12, wrap="none", font=("Consolas", 10), padx=8, pady=8)
         self.hydra_log.grid(row=1, column=0, sticky="nsew")
@@ -196,6 +198,8 @@ class RunnerMixin:
 
         for var in (self.min_combos_var, self.min_hits_var, self.status_filter_var, self.last_run_filter_var):
             var.trace_add("write", lambda *_: self.apply_runner_filters_and_sort())
+
+        self.refresh_runner_controls_state()
 
     def _coerce_int(self, value):
         try:
@@ -352,11 +356,35 @@ class RunnerMixin:
         return [row["site"] for row in self.runner_rows_all if row.get("selected")]
 
     def install_hydra_from_runner(self):
-        from install_tools import install_hydra
         state = install_hydra(log_func=self._write_log_threadsafe)
         self._write_log_threadsafe(state.get("message", "Hydra install attempted"))
-        ensure_hydra_available(log_func=self._write_log_threadsafe)
+        force_retry_hydra(log_func=self._write_log_threadsafe)
         self.refresh_runner_controls_state()
+
+    def show_hydra_troubleshooting(self):
+        """Open a focused view of Hydra startup/runner errors from the in-app log."""
+        content = self.hydra_log.get("1.0", tk.END)
+        lines = [ln for ln in content.splitlines() if "hydra" in ln.lower() or "[startup]" in ln.lower() or "wsl" in ln.lower()]
+        preview = "\n".join(lines[-200:]) if lines else "No Hydra-specific entries captured yet."
+        win = tk.Toplevel(self.root)
+        win.title("Hydra Troubleshooting")
+        win.geometry("900x500")
+        txt = tk.Text(win, wrap="word")
+        txt.pack(fill="both", expand=True)
+        txt.insert(tk.END, preview)
+        txt.configure(state="disabled")
+
+    def refresh_runner_controls_state(self):
+        status = ensure_hydra_available(log_func=self._write_log_threadsafe)
+        enabled = bool(status.get("available")) and bool(config.get("runner_enabled", True))
+        self.run_selected_button.config(state="normal" if enabled else "disabled")
+        self.run_all_button.config(state="normal" if enabled else "disabled")
+        if enabled:
+            self.hydra_missing_frame.grid_forget()
+        else:
+            self.hydra_missing_frame.grid(row=3, column=0, sticky="w", pady=(6, 0))
+            self.hydra_missing_label.config(text="Hydra not detected — Install or Troubleshoot?")
+            config["hydra_status"] = "missing"
 
     def run_selected_hydra(self):
         if not config.get("runner_enabled", True):
@@ -565,24 +593,22 @@ class RunnerMixin:
                     )
                 else:
                     split_cmd = shlex.split(cmd, posix=(os.name != "nt"))
-                    completed = subprocess.run(
+                    env = os.environ.copy()
+                    hydra_bin = str(config.get("HYDRA_BIN", "")).strip()
+                    hydra_parent = str(Path(hydra_bin).expanduser().resolve().parent) if hydra_bin else ""
+                    if hydra_parent and hydra_parent not in env.get("PATH", ""):
+                        env["PATH"] = hydra_parent + os.pathsep + env.get("PATH", "")
+                    process = subprocess.Popen(
                         split_cmd,
-                        capture_output=True,
-                        shell=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
                         text=True,
                         encoding="utf-8",
                         errors="replace",
+                        bufsize=1,
+                        cwd=(Path(hydra_bin).parent if hydra_bin else None),
+                        env=env,
                     )
-                    for line in completed.stdout.splitlines(True):
-                        self._append_hydra_log_threadsafe(line)
-                        with runner_log_file.open("a", encoding="utf-8") as lf:
-                            lf.write(line)
-                        self._capture_hit(site, line)
-                    if completed.stderr:
-                        self._append_hydra_log_threadsafe(completed.stderr)
-                        with runner_log_file.open("a", encoding="utf-8") as lf:
-                            lf.write(completed.stderr)
-                    process = None
 
                 if process is not None:
                     self.runner_active_process = process
@@ -602,8 +628,6 @@ class RunnerMixin:
                         self._append_hydra_log_threadsafe(f"[WARN] Timeout reached ({timeout_seconds}s) for {site}; terminating process.\n")
                         self._terminate_process_tree(process, "timeout")
                     returncode = process.returncode
-                else:
-                    returncode = completed.returncode
 
                 if returncode == 0 and not self.cancel_event.is_set():
                     self._append_hydra_log_threadsafe(f"[SUCCESS] Command finished for {site}\n")

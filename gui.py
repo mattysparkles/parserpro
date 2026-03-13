@@ -19,7 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
-from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
+from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, force_retry_hydra, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
 from extract import extract_login_form, test_credentials_for_site
 from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
 from zap import import_data_to_zap, launch_zap, run_zap_active_scan
@@ -883,9 +883,35 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Checkbutton(checks, text="Burp Community", variable=self.install_burp_var).pack(anchor="w")
         self.install_progress = ttk.Progressbar(frame, mode="determinate", maximum=3)
         self.install_progress.pack(fill="x", pady=(0, 8))
-        ttk.Button(frame, text="Install Selected Tools", command=self.install_selected_tools).pack(anchor="w", pady=(0, 8))
+        btns = ttk.Frame(frame)
+        btns.pack(anchor="w", pady=(0, 8))
+        ttk.Button(btns, text="Install Selected Tools", command=self.install_selected_tools).pack(side="left")
+        ttk.Button(btns, text="Check/Install All", command=self.check_install_all_tools).pack(side="left", padx=(8, 0))
+
+        self.hydra_status_label = ttk.Label(frame, text="Hydra: unknown")
+        self.hydra_status_label.pack(anchor="w")
+        self.zap_status_label = ttk.Label(frame, text="ZAP: unknown")
+        self.zap_status_label.pack(anchor="w")
+        self.burp_status_label = ttk.Label(frame, text="Burp: unknown")
+        self.burp_status_label.pack(anchor="w", pady=(0, 8))
+
         self.install_log = tk.Text(frame, height=16, wrap="word")
         self.install_log.pack(fill="both", expand=True)
+        self.update_tool_status_labels()
+
+    def update_tool_status_labels(self):
+        hydra = ensure_hydra_available(log_func=self._write_log_threadsafe)
+        self.hydra_status_label.config(text=f"Hydra: {'Installed' if hydra.get('available') else 'Missing'} ({hydra.get('message','')})")
+        zap_path = str(config.get('ZAP_JAR', ''))
+        burp_path = str(config.get('BURP_JAR', ''))
+        self.zap_status_label.config(text=f"ZAP: {'Installed' if Path(zap_path).exists() else 'Missing'} at {zap_path}")
+        self.burp_status_label.config(text=f"Burp: {'Installed' if Path(burp_path).exists() else 'Missing'} at {burp_path}")
+
+    def check_install_all_tools(self):
+        self.install_hydra_var.set(True)
+        self.install_zap_var.set(True)
+        self.install_burp_var.set(True)
+        self.install_selected_tools()
 
     def install_selected_tools(self):
         tasks = []
@@ -902,7 +928,8 @@ class CombinedParserGUI(RunnerMixin):
             self.install_log.insert(tk.END, line)
             self.install_log.see(tk.END)
             self.install_progress.configure(value=index)
-        ensure_hydra_available(log_func=self._write_log_threadsafe)
+        force_retry_hydra(log_func=self._write_log_threadsafe)
+        self.update_tool_status_labels()
 
     def build_burp_tab(self, tab):
         frame = ttk.Frame(tab, padding=12)
