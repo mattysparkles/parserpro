@@ -3,6 +3,7 @@ import unittest
 from bs4 import BeautifulSoup
 
 from extract import _domain_is_allowlisted, extract_loginish_metadata
+from login_tester import hydra_runtime_flags_for_method
 
 
 class LoginModeTests(unittest.TestCase):
@@ -28,6 +29,12 @@ class LoginModeTests(unittest.TestCase):
         self.assertTrue(_domain_is_allowlisted("https://app.example.com/login", ["example.com"]))
         self.assertTrue(_domain_is_allowlisted("https://example.com", ["example.com"]))
         self.assertFalse(_domain_is_allowlisted("https://evil-example.com", ["example.com"]))
+
+    def test_hydra_runtime_flags_default_to_post_profile(self):
+        self.assertEqual(hydra_runtime_flags_for_method("post"), "-t 4 -f -V")
+
+    def test_hydra_runtime_flags_use_get_tuning_profile(self):
+        self.assertEqual(hydra_runtime_flags_for_method("get"), "-u -I -t 2 -w 10 -f -V")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ except ImportError:
 from config import config, get_intercept_proxy
 from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_requests, fetch_page_selenium, solve_captcha
 from helpers import COMMON_LOGIN_PATHS, get_base_url, normalize_and_validate_target, validate_url
-from login_tester import domain_from_url, hydra_module_for_method, save_hit
+from login_tester import domain_from_url, hydra_module_for_method, hydra_runtime_flags_for_method, save_hit
 
 
 def detect_failure_string(soup, url):
@@ -561,7 +561,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
             # FIXED: Hydra v9.1+ module:// target syntax
-            cmd_template = f'hydra -C "{{{{combo_file}}}}" {hydra_module}://"{target}" "{form_spec}" -V -t 4 -f'
+            runtime_flags = hydra_runtime_flags_for_method(method)
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" {hydra_module}://"{target}" "{form_spec}" {runtime_flags}'
             hydra_template = cmd_template
         else:
             custom_tester_required = True
