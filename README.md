@@ -198,7 +198,7 @@ Install Python dependencies:
 pip install -r requirements.txt
 ```
 
-Install Playwright browser:
+Install Playwright browser (ParserPro can auto-install Chromium on first startup, but manual install is still supported):
 
 ```bash
 python -m playwright install chromium
@@ -405,7 +405,7 @@ These are the core persisted config options exposed in settings/defaults.
 - `prefer_wsl_hydra` - prefer WSL hydra backend when available.
 - `auto_install_hydra` - attempt auto install when Hydra missing.
 - `hydra_timeout_seconds` - runner timeout per Hydra process.
-- `extract_site_timeout_seconds` - per-site extraction ceiling before a site is marked timed out.
+- `extract_site_timeout_seconds` - per-site extraction ceiling before a site is marked timed out (default 180 seconds).
 - `wsl_username` - optional WSL user for install/commands.
 - `wsl_password` - optional password for sudo install flow.
 - `auto_setup_chromedriver` - install/setup chromedriver automatically.
@@ -560,3 +560,29 @@ If you see "Hydra disabled" or "check log":
 ### Java requirement for ZAP/Burp
 
 ZAP and Burp jar launchers require Java in PATH (`java -version`).
+
+
+## Windows Defender / Firewall Exclusions (False Positives)
+
+On Windows, security tooling components can trigger false positives because they automate browser/network behavior:
+
+- `gost` (proxy tunneling)
+- Playwright Chromium runtime
+- Selenium + Chromedriver
+
+Symptoms include blocked connections, repeated timeouts, or sudden process termination.
+
+ParserPro now includes a guided Settings section where you can:
+
+1. Read a plain-English explanation of risks.
+2. Tick **"I understand the risks"**.
+3. Click **"Create exclusions now?"** to run a PowerShell exclusion command (Windows only, user-confirmed).
+
+> You stay in control: exclusions are optional and may require Administrator rights.
+
+### New log files
+
+ParserPro writes two daily logs under `logs/`:
+
+- `parserpro_detailed_YYYYMMDD.log` – full diagnostic details (errors, stack traces, proxy failures, timeouts).
+- `parserpro_privacy_YYYYMMDD.log` – privacy-safe copy where domain names are replaced with `genericexamplewebsite.com`.

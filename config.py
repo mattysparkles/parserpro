@@ -181,10 +181,12 @@ def load_config():
     loaded.setdefault("prefer_wsl_hydra", True)
     loaded.setdefault("auto_install_hydra", True)
     loaded.setdefault("hydra_timeout_seconds", 3600)
-    loaded.setdefault("extract_site_timeout_seconds", 120)
+    loaded.setdefault("extract_site_timeout_seconds", 180)
     loaded.setdefault("wsl_username", "")
     loaded.setdefault("wsl_password", "")
     loaded.setdefault("auto_setup_chromedriver", True)
+    loaded.setdefault("playwright_auto_install", True)
+    loaded.setdefault("defender_exclusions_ack", False)
     loaded.setdefault("auto_configure_nordvpn_path", True)
     return loaded
 
