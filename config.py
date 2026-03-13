@@ -470,7 +470,20 @@ def ensure_hydra_available(log_func=None):
     """Ensure Hydra is callable, preferring WSL on Windows when available."""
     # FIX: Delegate to unified startup/setup flow so GUI and main share robust detection.
     status = check_and_setup_hydra(log_func=log_func)
-    return {"available": status.get("available", False), "mode": status.get("mode"), "message": status.get("message", "")}
+    return {
+        "available": status.get("available", False),
+        "mode": status.get("mode"),
+        "message": status.get("message", ""),
+        "status": status.get("status", "ok" if status.get("available") else "missing"),
+    }
+
+
+def force_retry_hydra(log_func=None):
+    """Explicitly re-check Hydra availability without forcing permanent disable flags."""
+    config["hydra_status"] = "retrying"
+    status = check_and_setup_hydra(log_func=log_func)
+    config["hydra_status"] = "ok" if status.get("available") else "missing"
+    return status
 
 
 def check_and_setup_hydra(log_func=None):
@@ -570,9 +583,12 @@ def check_and_setup_hydra(log_func=None):
     if not shutil.which("hydra"):
         reasons.append("hydra not in PATH")
     if os.name == "nt" and not _wsl_available():
-        reasons.append("WSL not running")
+        reasons.append("WSL not running — start WSL?")
     if os.name == "nt" and not (HYDRA_DIR / "hydra.exe").exists():
         reasons.append("tools/hydra/hydra.exe missing")
+    configured = str(config.get("HYDRA_BIN", "")).strip()
+    if configured and Path(configured).exists() and not os.access(configured, os.X_OK):
+        reasons.append("configured hydra binary not executable")
 
     if auto_install:
         _log_hydra(logs, "Hydra missing; auto-install attempt requested", log_func)

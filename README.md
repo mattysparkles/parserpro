@@ -422,7 +422,7 @@ Behavior overview:
 1. Detect existing hydra.
 2. If unavailable, attempt supported install/setup workflows.
 3. Store backend mode and distro metadata when found.
-4. If still unavailable, runner remains disabled but extractor still works.
+4. If still unavailable, Hydra status is marked as `missing` (not permanently disabled) so you can retry from **Tools** or Runner troubleshooting.
 
 Hydra commands are generated from extracted form metadata and combo file placeholders.
 
@@ -461,11 +461,12 @@ Hydra commands are generated from extracted form metadata and combo file placeho
 
 ## Troubleshooting Guide
 
-### Problem: Hydra runner disabled
+### Problem: Hydra runner disabled / check log
 
-- Run extractor mode anyway (data prep still works).
-- Install hydra manually and restart app.
-- On Windows, ensure WSL is installed/configured if using WSL path.
+- Open **Tools** tab and click **Check/Install All** or **Install Selected Tools**.
+- In the Runner tab, use **Hydra not detected — Install or Troubleshoot?** to retry install and open filtered log diagnostics.
+- Hydra detection now retries on demand (`force_retry_hydra`) and records explicit reasons like `hydra not in PATH`, `WSL not running`, or non-executable binary state.
+- On Windows, ensure WSL is installed/configured if using WSL mode.
 
 ### Problem: No forms extracted
 
