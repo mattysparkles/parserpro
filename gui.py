@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app_logging import logger
+from logging import write_detailed_log, write_privacy_log
 from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, download_gost, ensure_hydra_available, ensure_nordvpn_cli, force_retry_hydra, get_effective_proxy, get_intercept_proxy, get_vpn_control, save_config
 from extract import extract_login_form, test_credentials_for_site
 from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
@@ -447,6 +448,8 @@ class CombinedParserGUI(RunnerMixin):
         if self.extract_log_file:
             with self.extract_log_file.open("a", encoding="utf-8") as fh:
                 fh.write(text + "\n")
+        write_detailed_log(text, "INFO")
+        write_privacy_log(text, "INFO")
         self.ui_queue.put(("extractor_log", text + "\n"))
 
     def _update_status_threadsafe(self, text):
@@ -828,7 +831,11 @@ class CombinedParserGUI(RunnerMixin):
 
         ttk.Label(network_frame, text="Retry TTL days (fetch failures)").pack(anchor="w", padx=10, pady=(0, 2))
         self.failed_retry_ttl_days = tk.IntVar(value=int(config.get("failed_retry_ttl_days", 1)))
-        ttk.Entry(network_frame, textvariable=self.failed_retry_ttl_days).pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Entry(network_frame, textvariable=self.failed_retry_ttl_days).pack(fill="x", padx=10, pady=(0, 8))
+
+        ttk.Label(network_frame, text="Extraction timeout per site (seconds)").pack(anchor="w", padx=10, pady=(0, 2))
+        self.extract_site_timeout_seconds = tk.IntVar(value=int(config.get("extract_site_timeout_seconds", 180)))
+        ttk.Spinbox(network_frame, from_=30, to=900, textvariable=self.extract_site_timeout_seconds).pack(fill="x", padx=10, pady=(0, 10))
 
         behavior_frame = ttk.LabelFrame(content, text="Behavior & Autosave")
         behavior_frame.pack(fill="x", padx=6, pady=8)
@@ -841,6 +848,29 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Label(behavior_frame, text="Autosave interval (minutes)").pack(anchor="w", padx=10, pady=(6, 2))
         self.autosave_interval_setting = tk.IntVar(value=self.autosave_interval_minutes.get())
         ttk.Entry(behavior_frame, textvariable=self.autosave_interval_setting).pack(fill="x", padx=10, pady=(0, 10))
+
+        defender_frame = ttk.LabelFrame(content, text="Windows Defender / Firewall Exclusions")
+        defender_frame.pack(fill="x", padx=6, pady=8)
+        ttk.Label(
+            defender_frame,
+            text=(
+                "Why false positives happen: GOST, Playwright Chromium, and Selenium/chromedriver use\n"
+                "automation + network behaviors that can look suspicious to AV/firewall heuristics."
+            ),
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        ttk.Label(
+            defender_frame,
+            text="Create exclusions only if you understand that excluded paths receive reduced scanning.",
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+        self.defender_exclusions_ack = tk.BooleanVar(value=bool(config.get("defender_exclusions_ack", False)))
+        ttk.Checkbutton(
+            defender_frame,
+            text="I understand the risks",
+            variable=self.defender_exclusions_ack,
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+        ttk.Button(defender_frame, text="Create exclusions now?", command=self.create_windows_exclusions).pack(anchor="w", padx=10, pady=(0, 10))
 
         proxy_rotation_frame = ttk.LabelFrame(content, text="Proxy Routing")
         proxy_rotation_frame.pack(fill="x", padx=6, pady=8)
@@ -1006,6 +1036,53 @@ class CombinedParserGUI(RunnerMixin):
         if fp:
             self.proxy_list_file.set(fp)
 
+
+    def create_windows_exclusions(self):
+        if platform.system().lower() != "windows":
+            messagebox.showinfo("Windows Defender", "Automatic exclusions are available on Windows only.")
+            return
+        if not hasattr(self, "defender_exclusions_ack") or not self.defender_exclusions_ack.get():
+            messagebox.showwarning("Windows Defender", "Please confirm the risk acknowledgement checkbox first.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm exclusions",
+            "ParserPro will ask PowerShell to add Defender exclusions for parserpro folder, data, logs, and tools. Continue?",
+        )
+        if not confirm:
+            return
+
+        targets = [
+            str(Path(__file__).resolve().parent),
+            str((DATA_DIR / "gost.exe").resolve()),
+            str((DATA_DIR / "ms-playwright").resolve()),
+            str((Path(__file__).resolve().parent / "tools").resolve()),
+        ]
+        script_lines = [
+            "$ErrorActionPreference='Continue'",
+            "Write-Output 'Applying Defender exclusions for ParserPro...'",
+        ]
+        for target in targets:
+            script_lines.append(f"if (Test-Path '{target}') {{ Add-MpPreference -ExclusionPath '{target}' -Force }}")
+        script = "; ".join(script_lines)
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+            logger.info(f"Defender exclusion command return code: {proc.returncode}")
+            if proc.returncode == 0:
+                messagebox.showinfo("Windows Defender", "Exclusion command completed. Review Windows Security > Virus & threat protection > Exclusions.")
+            else:
+                detail = (proc.stderr or proc.stdout or "unknown error").strip()
+                messagebox.showwarning("Windows Defender", f"Exclusions may not have been applied (admin rights may be required).\n{detail}")
+        except Exception as exc:
+            logger.warn(f"Defender exclusions failed: {exc}")
+            messagebox.showwarning("Windows Defender", f"Failed to execute exclusion command: {exc}")
+
     def save_settings(self):
         config['dbc_user'] = self.dbc_user.get()
         config['dbc_pass'] = self.dbc_pass.get()
@@ -1021,6 +1098,7 @@ class CombinedParserGUI(RunnerMixin):
         config['allow_nonstandard_ports'] = bool(self.allow_nonstandard_ports.get())
         config['cache_ttl_days'] = max(1, int(self.cache_ttl_days.get() or 30))
         config['failed_retry_ttl_days'] = max(1, int(self.failed_retry_ttl_days.get() or 1))
+        config['extract_site_timeout_seconds'] = max(30, int(self.extract_site_timeout_seconds.get() or 180))
         config['force_recheck'] = bool(self.force_recheck.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['use_burp'] = bool(self.use_burp.get())
@@ -1033,6 +1111,7 @@ class CombinedParserGUI(RunnerMixin):
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
+        config['defender_exclusions_ack'] = bool(self.defender_exclusions_ack.get()) if hasattr(self, 'defender_exclusions_ack') else bool(config.get('defender_exclusions_ack', False))
         config['use_playwright_dynamic'] = bool(self.use_playwright_dynamic.get())
         config['advanced_extraction_mode'] = bool(self.advanced_extraction_mode.get())
         self.autosave_enabled.set(bool(self.autosave_enabled_setting.get()))
@@ -2108,7 +2187,7 @@ class CombinedParserGUI(RunnerMixin):
                     rotation_counter += 1
                     return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
-                timeout_seconds = max(15, int(config.get("extract_site_timeout_seconds", 120) or 120))
+                timeout_seconds = max(15, int(config.get("extract_site_timeout_seconds", 180) or 180))
                 executor = ThreadPoolExecutor(max_workers=self.threads.get())
                 try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
@@ -2266,9 +2345,11 @@ class CombinedParserGUI(RunnerMixin):
 
                 if results:
                     keys = ['original_url', 'base_url', 'used_url', 'used_type', 'action', 'post_data',
-                            'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason', 'method', 'method_warning']
+                            'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason', 'method', 'method_warning',
+                            'status', 'fallback_used', 'playwright_used', 'checked_urls', 'action_url', 'user_field', 'pass_field', 'submit_mode', 'reasons',
+                            'classification', 'custom_tester_required', 'login_metadata', 'observed_login_flow']
                     with forms_path.open("w", newline="", encoding="utf-8") as f:
-                        writer = csv.DictWriter(f, fieldnames=keys)
+                        writer = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
                         writer.writeheader()
                         writer.writerows(results)
                     self._write_log_threadsafe(f"Found {len(results)} validated forms → {forms_path}")

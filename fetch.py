@@ -91,6 +91,8 @@ except ImportError:
     HAS_CLOUDSCRAPER = False
 
 
+_CHROMEDRIVER_STATUS_CACHE = None
+
 ERROR_CODE_MAP = {
     "ERR_NAME_NOT_RESOLVED": ("dns_failed", "DNS resolution failed"),
     "ERR_CONNECTION_CLOSED": ("conn_closed", "Connection closed by peer or non-web endpoint"),
@@ -226,16 +228,22 @@ def fetch_page_playwright(url, proxy=None):
 
 # NEW: Selenium + Chromedriver auto-setup check
 def ensure_chromedriver_available() -> tuple[bool, str, Optional[str]]:
-    """Try webdriver_manager install and return availability/message/driver_path."""
+    """Try webdriver_manager install once and cache availability/message/driver_path."""
+    global _CHROMEDRIVER_STATUS_CACHE
+    if _CHROMEDRIVER_STATUS_CACHE is not None:
+        return _CHROMEDRIVER_STATUS_CACHE
     if not HAS_SELENIUM:
-        return False, "selenium_not_installed", None
+        _CHROMEDRIVER_STATUS_CACHE = (False, "selenium_not_installed", None)
+        return _CHROMEDRIVER_STATUS_CACHE
     if not HAS_WEBDRIVER_MANAGER:
-        return False, "webdriver_manager_not_installed", None
+        _CHROMEDRIVER_STATUS_CACHE = (False, "webdriver_manager_not_installed", None)
+        return _CHROMEDRIVER_STATUS_CACHE
     try:
         driver_path = ChromeDriverManager().install()
-        return True, "chromedriver_ready", driver_path
+        _CHROMEDRIVER_STATUS_CACHE = (True, "chromedriver_ready", driver_path)
     except Exception as exc:
-        return False, f"chromedriver_auto_setup_failed: {exc}", None
+        _CHROMEDRIVER_STATUS_CACHE = (False, f"chromedriver_auto_setup_failed: {exc}", None)
+    return _CHROMEDRIVER_STATUS_CACHE
 
 
 def fetch_page_selenium(url, proxy=None):

@@ -25,7 +25,7 @@ try:
 except ImportError:
     InsecureRequestWarning = Warning
 
-from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config
+from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config, normalize_proxy, proxy_is_reachable, save_config
 from extract import extract_login_form
 from fetch import HAS_DEATHBYCAPTCHA
 from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
@@ -66,6 +66,49 @@ def log_optional_dbc_status_once() -> None:
         logging.info("[Startup] DeathByCaptcha provider available")
     else:
         logging.info("[Startup] DeathByCaptcha provider not installed; continuing without DBC")
+
+
+def ensure_playwright_chromium_once() -> tuple[bool, str]:
+    if not bool(config.get("playwright_auto_install", True)):
+        return True, "playwright auto-install disabled"
+
+    marker = DATA_DIR / ".playwright_chromium_ready"
+    if marker.exists():
+        return True, "playwright chromium already initialized"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+            logging.info("[Startup] Playwright Chromium installed/verified")
+            return True, "playwright chromium ready"
+        err = (result.stderr or result.stdout or "unknown error").strip()
+        logging.warning("[Startup] Playwright install warning: %s", err)
+        return False, f"playwright install failed: {err}"
+    except Exception as exc:
+        logging.warning("[Startup] Playwright install failed: %s", exc)
+        return False, f"playwright install failed: {exc}"
+
+
+def apply_startup_proxy_fallback() -> tuple[bool, str]:
+    proxy_cfg = normalize_proxy(config.get("proxy_url"))
+    if not proxy_cfg:
+        return True, "no startup proxy configured"
+
+    if proxy_is_reachable(proxy_cfg, timeout=2.0):
+        return True, f"proxy reachable: {proxy_cfg.get('server')}"
+
+    config["proxy_url"] = ""
+    save_config()
+    warning = f"SOCKS/HTTP proxy unreachable at startup ({proxy_cfg.get('server')}); using direct connection"
+    logging.warning("[Startup] %s", warning)
+    return False, warning
 
 if sys.platform == "win32":
     try:
@@ -130,6 +173,20 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
         _log_note(notes, "Chromedriver check passed.", logger)
     else:
         notes.append(f"Chromedriver setup warning: {chromedriver_msg}")
+
+    proxy_ok, proxy_msg = apply_startup_proxy_fallback()
+    if proxy_ok:
+        _log_note(notes, f"Proxy check: {proxy_msg}", logger)
+    else:
+        notes.append(proxy_msg)
+
+    playwright_ok, playwright_msg = ensure_playwright_chromium_once()
+    if playwright_ok:
+        _log_note(notes, f"Playwright check: {playwright_msg}", logger)
+    else:
+        notes.append(f"Playwright setup warning: {playwright_msg}")
+
+    log_optional_dbc_status_once()
 
     nord_candidates = [
         shutil.which("nordvpn"),
@@ -215,7 +272,21 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
                 "validation_reason",
                 "method",
                 "method_warning",
+                "status",
+                "fallback_used",
+                "playwright_used",
+                "checked_urls",
+                "action_url",
+                "user_field",
+                "pass_field",
+                "submit_mode",
+                "reasons",
+                "classification",
+                "custom_tester_required",
+                "login_metadata",
+                "observed_login_flow",
             ],
+            extrasaction="ignore",
         )
         writer.writeheader()
         writer.writerows(forms)

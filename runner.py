@@ -15,6 +15,7 @@ from helpers import get_site_filename, log_once
 from burp import run_burp_with_project
 from zap import run_zap_active_scan
 from install_tools import install_hydra
+from logging import write_detailed_log, write_privacy_log
 
 
 
@@ -78,6 +79,8 @@ class RunnerMixin:
     HIT_RE = re.compile(r"login:\s*(?P<username>\S+)\s+password:\s*(?P<password>\S+)", re.IGNORECASE)
 
     def _append_hydra_log_threadsafe(self, text):
+        write_detailed_log(text.rstrip(), "INFO")
+        write_privacy_log(text.rstrip(), "INFO")
         self.ui_queue.put(("hydra_log", text))
 
     def build_runner_tab(self, tab):
