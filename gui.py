@@ -834,7 +834,7 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Entry(network_frame, textvariable=self.failed_retry_ttl_days).pack(fill="x", padx=10, pady=(0, 8))
 
         ttk.Label(network_frame, text="Extraction timeout per site (seconds)").pack(anchor="w", padx=10, pady=(0, 2))
-        self.extract_site_timeout_seconds = tk.IntVar(value=int(config.get("extract_site_timeout_seconds", 180)))
+        self.extract_site_timeout_seconds = tk.IntVar(value=int(config.get("extract_site_timeout_seconds", 300)))
         ttk.Spinbox(network_frame, from_=30, to=900, textvariable=self.extract_site_timeout_seconds).pack(fill="x", padx=10, pady=(0, 10))
 
         behavior_frame = ttk.LabelFrame(content, text="Behavior & Autosave")
@@ -849,28 +849,31 @@ class CombinedParserGUI(RunnerMixin):
         self.autosave_interval_setting = tk.IntVar(value=self.autosave_interval_minutes.get())
         ttk.Entry(behavior_frame, textvariable=self.autosave_interval_setting).pack(fill="x", padx=10, pady=(0, 10))
 
-        defender_frame = ttk.LabelFrame(content, text="Windows Defender / Firewall Exclusions")
+        # FIXED: User-facing Windows Security exclusions guidance + gated action button
+        defender_frame = ttk.LabelFrame(content, text="Windows Security Exclusions")
         defender_frame.pack(fill="x", padx=6, pady=8)
         ttk.Label(
             defender_frame,
             text=(
-                "Why false positives happen: GOST, Playwright Chromium, and Selenium/chromedriver use\n"
-                "automation + network behaviors that can look suspicious to AV/firewall heuristics."
+                "False positives common with headless browsers/proxies. Excluding folders prevents AV killing connections."
             ),
             justify="left",
         ).pack(anchor="w", padx=10, pady=(8, 4))
         ttk.Label(
             defender_frame,
-            text="Create exclusions only if you understand that excluded paths receive reduced scanning.",
+            text="Only do this if needed; exclusions weaken AV protection.",
             justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
         self.defender_exclusions_ack = tk.BooleanVar(value=bool(config.get("defender_exclusions_ack", False)))
         ttk.Checkbutton(
             defender_frame,
-            text="I understand the risks",
+            text="I understand risks (exclusions weaken AV protection)",
             variable=self.defender_exclusions_ack,
         ).pack(anchor="w", padx=10, pady=(0, 6))
-        ttk.Button(defender_frame, text="Create exclusions now?", command=self.create_windows_exclusions).pack(anchor="w", padx=10, pady=(0, 10))
+        self.exclusions_button = ttk.Button(defender_frame, text="Add Exclusions Now?", command=self.create_windows_exclusions, state="disabled")
+        self.exclusions_button.pack(anchor="w", padx=10, pady=(0, 10))
+        self.defender_exclusions_ack.trace_add("write", self._toggle_exclusions_button)
+        self._toggle_exclusions_button()
 
         proxy_rotation_frame = ttk.LabelFrame(content, text="Proxy Routing")
         proxy_rotation_frame.pack(fill="x", padx=6, pady=8)
@@ -1069,6 +1072,10 @@ class CombinedParserGUI(RunnerMixin):
             self.proxy_list_file.set(fp)
 
 
+    def _toggle_exclusions_button(self, *_args):
+        if hasattr(self, "exclusions_button"):
+            self.exclusions_button.configure(state=("normal" if self.defender_exclusions_ack.get() else "disabled"))
+
     def create_windows_exclusions(self):
         if platform.system().lower() != "windows":
             messagebox.showinfo("Windows Defender", "Automatic exclusions are available on Windows only.")
@@ -1084,25 +1091,20 @@ class CombinedParserGUI(RunnerMixin):
         if not confirm:
             return
 
-        targets = [
-            str(Path(__file__).resolve().parent),
-            str((DATA_DIR / "gost.exe").resolve()),
-            str((DATA_DIR / "ms-playwright").resolve()),
-            str((Path(__file__).resolve().parent / "tools").resolve()),
-        ]
-        script_lines = [
-            "$ErrorActionPreference='Continue'",
-            "Write-Output 'Applying Defender exclusions for ParserPro...'",
-        ]
-        for target in targets:
-            script_lines.append(f"if (Test-Path '{target}') {{ Add-MpPreference -ExclusionPath '{target}' -Force }}")
-        script = "; ".join(script_lines)
+        username = os.environ.get("USERNAME", "USERNAME")
+        inner = (
+            "Add-MpPreference -ExclusionPath 'C:\\parserpro'; "
+            f"Add-MpPreference -ExclusionPath 'C:\\Users\\{username}\\.wdm'; "
+            "Add-MpPreference -ExclusionProcess 'python.exe'; "
+            "Add-MpPreference -ExclusionProcess 'chromedriver.exe'"
+        )
+        script = f"Start-Process PowerShell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command \"{inner}\"'"
         try:
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
                 capture_output=True,
                 text=True,
-                timeout=45,
+                timeout=60,
                 check=False,
             )
             logger.info(f"Defender exclusion command return code: {proc.returncode}")
@@ -1130,7 +1132,7 @@ class CombinedParserGUI(RunnerMixin):
         config['allow_nonstandard_ports'] = bool(self.allow_nonstandard_ports.get())
         config['cache_ttl_days'] = max(1, int(self.cache_ttl_days.get() or 30))
         config['failed_retry_ttl_days'] = max(1, int(self.failed_retry_ttl_days.get() or 1))
-        config['extract_site_timeout_seconds'] = max(30, int(self.extract_site_timeout_seconds.get() or 180))
+        config['extract_site_timeout_seconds'] = max(30, int(self.extract_site_timeout_seconds.get() or 300))
         config['force_recheck'] = bool(self.force_recheck.get())
         config['burp_proxy'] = self.burp_proxy.get().strip()
         config['use_burp'] = bool(self.use_burp.get())
@@ -2219,7 +2221,7 @@ class CombinedParserGUI(RunnerMixin):
                     rotation_counter += 1
                     return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
-                timeout_seconds = max(15, int(config.get("extract_site_timeout_seconds", 180) or 180))
+                timeout_seconds = max(30, int(config.get("extract_site_timeout_seconds", 300) or 300))
                 executor = ThreadPoolExecutor(max_workers=self.threads.get())
                 try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
@@ -2376,10 +2378,15 @@ class CombinedParserGUI(RunnerMixin):
                 self._write_log_threadsafe(f"Extraction summary: forms found {forms_found_count}/{total} ({extraction_rate:.1f}%). 10-30% can be normal for noisy combo lists.")
 
                 if results:
-                    keys = ['original_url', 'base_url', 'used_url', 'used_type', 'action', 'post_data',
-                            'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason', 'method', 'method_warning',
-                            'status', 'fallback_used', 'playwright_used', 'checked_urls', 'action_url', 'user_field', 'pass_field', 'submit_mode', 'reasons',
-                            'classification', 'custom_tester_required', 'login_metadata', 'observed_login_flow']
+                    # FIXED: dynamic CSV field union prevents DictWriter key mismatch popups
+                    base_keys = ['original_url', 'base_url', 'used_url', 'used_type', 'action', 'post_data',
+                                 'failure_condition', 'hydra_command_template', 'combo_file', 'full_hydra_command', 'confidence', 'validation_reason', 'method', 'method_warning',
+                                 'status', 'fallback_used', 'playwright_used', 'checked_urls', 'action_url', 'user_field', 'pass_field', 'submit_mode', 'reasons',
+                                 'classification', 'custom_tester_required', 'login_metadata', 'observed_login_flow']
+                    key_union = set(base_keys)
+                    for row in results:
+                        key_union.update((row or {}).keys())
+                    keys = base_keys + sorted(k for k in key_union if k not in base_keys)
                     with forms_path.open("w", newline="", encoding="utf-8") as f:
                         writer = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
                         writer.writeheader()

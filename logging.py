@@ -31,7 +31,7 @@ for _name in dir(_STDLIB_LOGGING):
 _APP_ROOT = Path(__file__).resolve().parent
 _LOG_DIR = _APP_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
-_DOMAIN_RE = re.compile(r"\b(?:https?://)?(?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?\b")
+_DOMAIN_RE = re.compile(r"https?://[^/]+")
 
 
 def _log_file(prefix: str) -> Path:
@@ -42,14 +42,24 @@ def _sanitize_domains(message: str) -> str:
     return _DOMAIN_RE.sub("genericexamplewebsite.com", message or "")
 
 
-def write_detailed_log(message: str, level: str = "INFO") -> None:
+# FIXED: required helper names and log file format
+def write_detailed(message: str, level: str = "INFO") -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with _log_file("parserpro_detailed").open("a", encoding="utf-8") as handle:
+    with _log_file("detailed").open("a", encoding="utf-8") as handle:
         handle.write(f"[{ts}] {level.upper()}: {message}\n")
 
 
-def write_privacy_log(message: str, level: str = "INFO") -> None:
+def write_privacy(message: str, level: str = "INFO") -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_message = _sanitize_domains(message)
-    with _log_file("parserpro_privacy").open("a", encoding="utf-8") as handle:
+    with _log_file("privacy").open("a", encoding="utf-8") as handle:
         handle.write(f"[{ts}] {level.upper()}: {safe_message}\n")
+
+
+# Backward-compatible aliases.
+def write_detailed_log(message: str, level: str = "INFO") -> None:
+    write_detailed(message, level)
+
+
+def write_privacy_log(message: str, level: str = "INFO") -> None:
+    write_privacy(message, level)

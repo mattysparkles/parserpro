@@ -263,7 +263,7 @@ def observe_login_flow(url, proxy=None, allowlisted_domains=None, enable_dummy_i
             )
 
         page.on("response", on_response)
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(url, wait_until="domcontentloaded", timeout=180000)
         page.wait_for_timeout(1500)
 
         login_like = bool(page.query_selector("input[type='password']"))
@@ -635,7 +635,7 @@ def test_credentials_for_site(site_result, combos, proxy=None):
             browser = p.chromium.launch(**launch_args)
             ctx = browser.new_context(ignore_https_errors=bool(config.get("ignore_https_errors", False)))
             page = ctx.new_page()
-            page.goto(action_url, wait_until="domcontentloaded", timeout=30000)
+            page.goto(action_url, wait_until="domcontentloaded", timeout=180000)
             page.fill(f'input[name="{user_field}"]', username)
             page.fill(f'input[name="{pass_field}"]', password)
             page.click("button[type='submit'],input[type='submit']")

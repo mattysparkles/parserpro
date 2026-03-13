@@ -17,7 +17,7 @@ class SeleniumTimeoutHandlingTests(unittest.TestCase):
 
         self.assertEqual(html, "<html></html>")
         self.assertIsNone(err)
-        driver.set_page_load_timeout.assert_called_once_with(35)
+        driver.set_page_load_timeout.assert_called_once_with(180)
         driver.quit.assert_called_once()
 
     @patch("fetch.normalize_and_validate_target", return_value=("https://example.com", None))
