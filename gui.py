@@ -11,7 +11,7 @@ import uuid
 
 import requests
 from collections import defaultdict, deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FuturesTimeoutError, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -90,7 +90,7 @@ class CombinedParserGUI(RunnerMixin):
         self.use_proxy = tk.BooleanVar(value=get_vpn_control(config) == "nordvpn")
         self.proxy_url = tk.StringVar(value=config.get("proxy_url", ""))
         self.tld_only = tk.BooleanVar(value=True)
-        self.threads = tk.IntVar(value=6)
+        self.threads = tk.IntVar(value=4)  # FIXED: safer default concurrency
         self.strict_validation = tk.BooleanVar(value=True)
         self.use_playwright_dynamic = tk.BooleanVar(value=bool(config.get("use_playwright_dynamic", False)))
         self.advanced_extraction_mode = tk.BooleanVar(value=bool(config.get("advanced_extraction_mode", False)))
@@ -2221,7 +2221,7 @@ class CombinedParserGUI(RunnerMixin):
                     rotation_counter += 1
                     return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
-                timeout_seconds = max(30, int(config.get("extract_site_timeout_seconds", 300) or 300))
+                timeout_seconds = max(300, int(config.get("extract_site_timeout_seconds", 300) or 300))  # FIXED: 5-minute per-site timeout
                 executor = ThreadPoolExecutor(max_workers=self.threads.get())
                 try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
@@ -2229,7 +2229,13 @@ class CombinedParserGUI(RunnerMixin):
                     pending = set(future_to_base)
                     i = 0
                     while pending:
-                        done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                        done = set()
+                        try:
+                            for future in as_completed(list(pending), timeout=0.5):
+                                done.add(future)
+                        except FuturesTimeoutError:
+                            pass
+                        pending -= done
                         now_mono = time.monotonic()
                         timed_out = []
                         for future in list(pending):

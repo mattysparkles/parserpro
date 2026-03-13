@@ -523,9 +523,8 @@ class RunnerMixin:
             # FIXED: No shell + no & escape + action strip + ^ dedup
             combo_file = combo_file.replace("\\", "/")
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            cmd = cmd.replace('http-post-form ""', 'http-post-form "')
-            cmd = cmd.replace('"" ', '" ')
             cmd = cmd.replace('""', '"')
+            cmd = re.sub(r'\^{2,}', '^', cmd)
             self.hydra_log.insert(tk.END, f"[RAW AFTER REPLACE] {cmd}\n")
             self.hydra_log.insert(tk.END, f"[AFTER QUOTE COLLAPSE] {cmd}\n")
 
@@ -538,9 +537,6 @@ class RunnerMixin:
             cmd = re.sub(r'\^{2,}', '^', cmd)
             self.hydra_log.insert(tk.END, f"[AFTER ^ DEDUP] {cmd}\n")
 
-            target = site
-            if f'"{target}"' not in cmd:
-                cmd = cmd.replace(target, f'"{target}"')  # ensure target quoted
             self.hydra_log.insert(tk.END, f"[FINAL BEFORE RUN] {cmd}\n")
 
             # FIXED: Warn for non-critical anomalies; only skip on critical validation failure
@@ -603,6 +599,7 @@ class RunnerMixin:
                         env["PATH"] = hydra_parent + os.pathsep + env.get("PATH", "")
                     process = subprocess.Popen(
                         split_cmd,
+                        shell=False,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
