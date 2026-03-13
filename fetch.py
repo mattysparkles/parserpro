@@ -3,6 +3,7 @@ import subprocess
 import sys
 import time
 import traceback
+import importlib
 
 from typing import Optional
 
@@ -198,12 +199,22 @@ def get_dbc_client(user, password):
     for module in (deathbycaptcha, deathbycaptcha_official):
         if not module:
             continue
-        socket_client = getattr(module, "SocketClient", None)
-        if socket_client:
-            return socket_client(user, password)
-        http_client = getattr(module, "HttpClient", None)
-        if http_client:
-            return http_client(user, password)
+
+        module_variants = [module]
+        nested_module_name = f"{module.__name__}.{module.__name__.split('.')[-1]}"
+        try:
+            nested_module = importlib.import_module(nested_module_name)
+            module_variants.append(nested_module)
+        except Exception:
+            pass
+
+        for module_variant in module_variants:
+            socket_client = getattr(module_variant, "SocketClient", None)
+            if socket_client:
+                return socket_client(user, password)
+            http_client = getattr(module_variant, "HttpClient", None)
+            if http_client:
+                return http_client(user, password)
     return None
 
 
