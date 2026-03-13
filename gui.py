@@ -917,8 +917,10 @@ class CombinedParserGUI(RunnerMixin):
         self.install_status_label.pack(anchor="w", pady=(0, 8))
         btns = ttk.Frame(frame)
         btns.pack(anchor="w", pady=(0, 8))
-        ttk.Button(btns, text="Install Selected Tools", command=self.install_selected_tools).pack(side="left")
-        ttk.Button(btns, text="Check/Install All", command=self.check_install_all_tools).pack(side="left", padx=(8, 0))
+        self.install_selected_btn = ttk.Button(btns, text="Install Selected Tools", command=self.install_selected_tools)
+        self.install_selected_btn.pack(side="left")
+        self.install_all_btn = ttk.Button(btns, text="Check/Install All", command=self.check_install_all_tools)
+        self.install_all_btn.pack(side="left", padx=(8, 0))
 
         self.hydra_status_label = ttk.Label(frame, text="Hydra: unknown")
         self.hydra_status_label.pack(anchor="w")
@@ -946,6 +948,11 @@ class CombinedParserGUI(RunnerMixin):
         self.install_selected_tools()
 
     def install_selected_tools(self):
+        if getattr(self, "_installing_tools", False):
+            self.install_log.insert(tk.END, "Installer is already running. Please wait for completion.\n")
+            self.install_log.see(tk.END)
+            return
+
         tasks = []
         if self.install_hydra_var.get():
             tasks.append(("Hydra", install_hydra))
@@ -957,16 +964,33 @@ class CombinedParserGUI(RunnerMixin):
         if not tasks:
             self.install_status_label.config(text="Installer status: no tools selected")
             return
+        self._installing_tools = True
+        self.install_selected_btn.configure(state="disabled")
+        self.install_all_btn.configure(state="disabled")
+
+        worker = threading.Thread(target=self._run_tool_installs, args=(tasks,), daemon=True)
+        worker.start()
+
+    def _run_tool_installs(self, tasks):
         for index, (name, fn) in enumerate(tasks, start=1):
-            self.install_status_label.config(text=f"Installer status: installing {name} ({index}/{len(tasks)})")
-            self.root.update_idletasks()
+            self.root.after(0, lambda i=index, n=name, total=len(tasks): self.install_status_label.config(text=f"Installer status: installing {n} ({i}/{total})"))
             state = fn(log_func=self._write_log_threadsafe)
-            line = f"[{name}] {state.get('message', state)}\n"
-            self.install_log.insert(tk.END, line)
-            self.install_log.see(tk.END)
-            self.install_progress.configure(value=index)
-        self.install_status_label.config(text="Installer status: complete")
+            self.root.after(0, lambda i=index, n=name, s=state: self._append_installer_result(i, n, s))
+
         force_retry_hydra(log_func=self._write_log_threadsafe)
+        self.root.after(0, self._finish_tool_installs)
+
+    def _append_installer_result(self, index, name, state):
+        line = f"[{name}] {state.get('message', state)}\n"
+        self.install_log.insert(tk.END, line)
+        self.install_log.see(tk.END)
+        self.install_progress.configure(value=index)
+
+    def _finish_tool_installs(self):
+        self._installing_tools = False
+        self.install_selected_btn.configure(state="normal")
+        self.install_all_btn.configure(state="normal")
+        self.install_status_label.config(text="Installer status: complete")
         self.update_tool_status_labels()
 
     def build_burp_tab(self, tab):
@@ -2409,5 +2433,4 @@ class CombinedParserGUI(RunnerMixin):
         self._write_log_threadsafe(msg)
         if ok:
             self.status_text.set("ZAP active scan queued")
-
 
