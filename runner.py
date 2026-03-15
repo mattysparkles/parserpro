@@ -523,8 +523,9 @@ class RunnerMixin:
             # FIXED: No shell + no & escape + action strip + ^ dedup
             combo_file = combo_file.replace("\\", "/")
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
-            # FIXED: Normalize malformed hydra module quoting emitted by legacy templates
+            # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
             cmd = cmd.replace('http-post-form://"', 'http-post-form://')
+            cmd = cmd.replace('" ', ' ')
             cmd = cmd.replace('""', '"')
             # FIXED: Deduplicate caret runs so ^USER^/^PASS^ remain valid placeholders
             cmd = re.sub(r'\^{2,}', '^', cmd)
