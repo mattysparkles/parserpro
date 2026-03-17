@@ -555,7 +555,8 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
             print(f"[RAW POST DATA] {post_data}")
 
             # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
-            path = action.replace(f"https://{target}", "").replace(f"http://{target}", "").lstrip('/')
+            parsed_action = urlparse(action)
+            path = parsed_action.path or action
             if not path.startswith("/"):
                 path = f"/{path}"
 
