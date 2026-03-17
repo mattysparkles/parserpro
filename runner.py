@@ -525,12 +525,9 @@ class RunnerMixin:
             cmd = cmd_template.replace("{{combo_file}}", combo_file)
             # FIXED: Correct Hydra module:// syntax - no quotes around server, path-only form string
             cmd = cmd.replace('http-post-form://"', 'http-post-form://')
-            cmd = cmd.replace('" ', ' ')
-            cmd = cmd.replace('""', '"')
             # FIXED: Deduplicate caret runs so ^USER^/^PASS^ remain valid placeholders
             cmd = re.sub(r'\^{2,}', '^', cmd)
             self.hydra_log.insert(tk.END, f"[RAW AFTER REPLACE] {cmd}\n")
-            self.hydra_log.insert(tk.END, f"[AFTER QUOTE COLLAPSE] {cmd}\n")
 
             if not Path(combo_file).exists():
                 self._append_hydra_log_threadsafe(f"Combo file missing: {combo_file}\n")
