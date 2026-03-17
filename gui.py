@@ -38,6 +38,7 @@ from project_io import (
     export_run_summaries_csv,
     export_timeline_csv,
     load_project_payload,
+    parse_project_json,
     site_report_rows,
     summarize_status_counts,
     top_failing_domains,
@@ -1348,8 +1349,20 @@ class CombinedParserGUI(RunnerMixin):
         fp = filedialog.askopenfilename(filetypes=[("ParserPro Project", "*.pproj *.parserproproj.json"), ("JSON", "*.json")])
         if not fp:
             return
-        raw = json.loads(Path(fp).read_text(encoding="utf-8"))
+        try:
+            raw, parse_warnings = parse_project_json(Path(fp).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            messagebox.showerror(
+                "Open project failed",
+                f"Could not parse project JSON.\n\n{exc}\n\n"
+                "Tip: open the file in a text editor and check around the reported line/column."
+            )
+            self.record_event("ERROR", "project", "load_failed", "Project JSON parse failed", {"path": fp, "error": str(exc)})
+            return
+
         proj = load_project_payload(raw)
+        for warning in parse_warnings:
+            self._write_log_threadsafe(warning)
         self.current_project_path = fp
         self.current_project_name = proj.get("project_name") or Path(fp).stem
         self.project_created_ts = proj.get("created_ts")

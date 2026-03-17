@@ -1,6 +1,7 @@
 import csv
 import json
 import threading
+from json import JSONDecodeError
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -68,6 +69,65 @@ def load_project_payload(payload):
         "session_settings": data.get("session_settings") or {},
         "project_path": data.get("project_path", ""),
     }
+
+
+def _strip_trailing_commas(text):
+    out = []
+    in_string = False
+    escape = False
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "]}":
+                i += 1
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def parse_project_json(text):
+    cleaned = text.lstrip("\ufeff").replace("\x00", "")
+    try:
+        return json.loads(cleaned), []
+    except JSONDecodeError as exc:
+        repaired = _strip_trailing_commas(cleaned)
+        if repaired != cleaned:
+            try:
+                payload = json.loads(repaired)
+                return payload, [
+                    (
+                        "Recovered project file by removing trailing commas. "
+                        "Please re-save this project to keep a clean JSON format."
+                    )
+                ]
+            except JSONDecodeError:
+                pass
+        raise exc
 
 
 def summarize_status_counts(rows):
