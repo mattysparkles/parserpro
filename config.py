@@ -188,6 +188,20 @@ def load_config():
     loaded.setdefault("playwright_auto_install", True)
     loaded.setdefault("defender_exclusions_ack", False)
     loaded.setdefault("auto_configure_nordvpn_path", True)
+    loaded.setdefault("enable_onion_processing", False)
+    loaded.setdefault("use_nordvpn_onion_only", False)
+    loaded.setdefault("random_user_agent", False)
+    loaded.setdefault("selected_user_agent", "")
+    loaded.setdefault("custom_user_agent", "")
+    loaded.setdefault("user_agent_library", [])
+    loaded.setdefault("tor_executable_path", "")
+    loaded.setdefault("proxy_scope", "both")
+    loaded.setdefault("threads_scope", "both")
+    loaded.setdefault("timeout_scope", "both")
+    loaded.setdefault("captcha_scope", "both")
+    loaded.setdefault("validation_scope", "both")
+    loaded.setdefault("random_user_agent_scope", "both")
+    loaded.setdefault("user_agent_scope", "both")
     return loaded
 
 

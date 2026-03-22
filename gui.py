@@ -24,8 +24,8 @@ from config import DATA_DIR, HITS_DIR, LOGS_DIR, PROCESSED_SITES_FILE, config, d
 from extract import extract_login_form, test_credentials_for_site
 from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
 from zap import import_data_to_zap, launch_zap, run_zap_active_scan
-from install_tools import install_burp, install_hydra, install_zap
-from helpers import COMMON_LOGIN_PATHS, get_base_url, get_site_filename, log_once, normalize_and_validate_target, normalize_site, split_three_fields
+from install_tools import check_nordvpn_onion_support, detect_tor_installation, install_burp, install_hydra, install_tor_dependencies, install_zap
+from helpers import COMMON_LOGIN_PATHS, RELEVANT_SCOPE_KEYS, SETTING_SCOPE_OPTIONS, classify_onion_reachability, get_base_url, get_scoped_value, get_site_filename, get_user_agent_library, is_onion_url, is_tor_running, log_once, normalize_and_validate_target, normalize_site, resolve_user_agent, scope_applies, split_three_fields, start_tor_process
 from runner import RunnerMixin
 from proxies import ProxyManager
 from project_io import (
@@ -68,6 +68,47 @@ def apply_theme(root):
     style.configure("TNotebook.Tab", padding=(16, 8), font=("Segoe UI Semibold", 10))
 
 
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+
+    def show(self, _event=None):
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = ttk.Label(tw, text=self.text, justify="left", relief="solid", borderwidth=1, padding=6, background="#fff8dc")
+        label.pack()
+
+    def hide(self, _event=None):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
+class CollapsibleFrame(ttk.Frame):
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self._visible = tk.BooleanVar(value=True)
+        self.toggle = ttk.Checkbutton(self, text=title, variable=self._visible, command=self._update, style="Toolbutton")
+        self.toggle.pack(fill="x", anchor="w")
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="both", expand=True, pady=(6, 0))
+
+    def _update(self):
+        if self._visible.get():
+            self.body.pack(fill="both", expand=True, pady=(6, 0))
+        else:
+            self.body.pack_forget()
+
+
 class CombinedParserGUI(RunnerMixin):
     def __init__(self, root):
         self.root = root
@@ -90,6 +131,12 @@ class CombinedParserGUI(RunnerMixin):
         self.trim_whitespace = tk.BooleanVar(value=True)
         self.use_proxy = tk.BooleanVar(value=get_vpn_control(config) == "nordvpn")
         self.proxy_url = tk.StringVar(value=config.get("proxy_url", ""))
+        self.enable_onion_processing = tk.BooleanVar(value=bool(config.get("enable_onion_processing", False)))
+        self.use_nordvpn_onion_only = tk.BooleanVar(value=bool(config.get("use_nordvpn_onion_only", False)))
+        self.random_user_agent = tk.BooleanVar(value=bool(config.get("random_user_agent", False)))
+        self.selected_user_agent = tk.StringVar(value=config.get("selected_user_agent", "") or (get_user_agent_library(config)[0] if get_user_agent_library(config) else ""))
+        self.custom_user_agent = tk.StringVar(value=config.get("custom_user_agent", ""))
+        self.user_agent_library = list(get_user_agent_library(config))
         self.tld_only = tk.BooleanVar(value=True)
         self.threads = tk.IntVar(value=4)  # FIXED: safer default concurrency
         self.strict_validation = tk.BooleanVar(value=True)
@@ -117,6 +164,7 @@ class CombinedParserGUI(RunnerMixin):
         self.ui_queue = queue.Queue()
         self._main_thread = threading.current_thread()
         self.gost_process = None
+        self.tor_process = None
 
         self.timeline_events = []
         self.timeline_sort_state = {"column": "Time", "reverse": True}
@@ -175,7 +223,7 @@ class CombinedParserGUI(RunnerMixin):
         if not bool(config.get("startup_dependency_checks", True)):
             return
 
-        self.status_text.set("Running startup checks (Hydra, chromedriver, VPN, proxy)...")
+        self.status_text.set("Running startup checks (Hydra, chromedriver, VPN, proxy, Tor)...")
         self.record_event("INFO", "ui", "startup_check_begin", "Startup checks started", {"async": True})
         results: queue.Queue[tuple[list[str], str]] = queue.Queue(maxsize=1)
 
@@ -205,6 +253,11 @@ class CombinedParserGUI(RunnerMixin):
                     nord = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
                     if not nord.get("available"):
                         issues.append("NordVPN CLI missing (install required for vpn_control=nordvpn)")
+                if bool(config.get("enable_onion_processing", False)):
+                    if is_tor_running():
+                        self._write_log_threadsafe("Tor check: SOCKS proxy reachable on 127.0.0.1:9050")
+                    else:
+                        issues.append("Tor is required for .onion processing but is not running on 127.0.0.1:9050")
 
                 # FIXED: Proxy fallback + single chromedriver check
                 proxy_url = str(config.get("proxy_url", "")).strip()
@@ -282,6 +335,14 @@ class CombinedParserGUI(RunnerMixin):
                     pass
                 finally:
                     self.gost_process = None
+            if self.tor_process:
+                try:
+                    if self.tor_process.poll() is None:
+                        self.tor_process.terminate()
+                except Exception:
+                    pass
+                finally:
+                    self.tor_process = None
             if not self._cleanup_log_emitted:
                 self._cleanup_log_emitted = True
                 try:
@@ -899,6 +960,69 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Entry(proxy_file_row, textvariable=self.proxy_list_file).pack(side="left", fill="x", expand=True)
         ttk.Button(proxy_file_row, text="Browse", command=self.choose_proxy_list_file).pack(side="left", padx=(8, 0))
 
+        tor_frame = CollapsibleFrame(content, "Tor / Onion Support")
+        tor_frame.pack(fill="x", padx=6, pady=8)
+        self.onion_managed_widgets = []
+
+        onion_enable = ttk.Checkbutton(tor_frame.body, text="Enable .onion processing", variable=self.enable_onion_processing, command=self.update_onion_settings_state)
+        onion_enable.pack(anchor="w", padx=10, pady=(8, 4))
+        ToolTip(onion_enable, "When disabled, every .onion URL is skipped entirely during parsing and extraction.")
+
+        nord_status = ensure_nordvpn_cli(log_func=None)
+        nord_groups = check_nordvpn_onion_support(log_func=None) if nord_status.get("available") else {"ok": False}
+        self.nordvpn_onion_check = ttk.Checkbutton(tor_frame.body, text="Use NordVPN Onion-over-VPN for .onion sites only", variable=self.use_nordvpn_onion_only)
+        self.nordvpn_onion_check.pack(anchor="w", padx=10, pady=4)
+        ToolTip(self.nordvpn_onion_check, "Before onion extraction, run nordvpn connect --group Onion and restore the previous route afterwards.")
+        self.onion_managed_widgets.append(self.nordvpn_onion_check)
+        if not (nord_status.get("available") and nord_groups.get("ok")):
+            self.nordvpn_onion_check.configure(state="disabled")
+
+        random_ua_check = ttk.Checkbutton(tor_frame.body, text="Random User-Agent on every request", variable=self.random_user_agent)
+        random_ua_check.pack(anchor="w", padx=10, pady=4)
+        ToolTip(random_ua_check, "Rotate to a different realistic User-Agent for each request when the configured scope matches the target.")
+        self.onion_managed_widgets.append(random_ua_check)
+
+        ttk.Label(tor_frame.body, text="Pre-configured User-Agent").pack(anchor="w", padx=10, pady=(8, 2))
+        self.user_agent_dropdown = ttk.Combobox(tor_frame.body, textvariable=self.selected_user_agent, values=self.user_agent_library, state="readonly")
+        self.user_agent_dropdown.pack(fill="x", padx=10, pady=(0, 8))
+        ToolTip(self.user_agent_dropdown, "Choose the default browser identity to use when random rotation is disabled for the target scope.")
+        self.onion_managed_widgets.append(self.user_agent_dropdown)
+
+        ua_button_row = ttk.Frame(tor_frame.body)
+        ua_button_row.pack(fill="x", padx=10, pady=(0, 8))
+        import_btn = ttk.Button(ua_button_row, text="Import User-Agent list from TXT", command=self.import_user_agent_list)
+        import_btn.pack(side="left")
+        add_btn = ttk.Button(ua_button_row, text="Add Custom User-Agent", command=self.add_custom_user_agent)
+        add_btn.pack(side="left", padx=(8, 0))
+        ToolTip(import_btn, "Import one User-Agent string per line from a TXT file and append them to the built-in library.")
+        ToolTip(add_btn, "Paste a complete desktop or mobile User-Agent string to add it to the library and select it immediately.")
+        self.onion_managed_widgets.extend([import_btn, add_btn])
+
+        ttk.Label(tor_frame.body, text="Per-setting target scope (default Both)").pack(anchor="w", padx=10, pady=(8, 4))
+        scope_grid = ttk.Frame(tor_frame.body)
+        scope_grid.pack(fill="x", padx=10, pady=(0, 10))
+        scope_defs = [
+            ("Proxy routing", "proxy_scope", "Which targets may use Burp/ZAP/proxy_url or Tor routing."),
+            ("Threads", "threads_scope", "Limit the extractor thread count to clear web, onion, or both."),
+            ("Timeout", "timeout_scope", "Apply the configured extraction timeout to clear web, onion, or both."),
+            ("Captcha solving", "captcha_scope", "Restrict CAPTCHA solving providers to the selected target type."),
+            ("Validation", "validation_scope", "Apply strict validation only where this scope matches."),
+            ("Random User-Agent", "random_user_agent_scope", "Enable per-request random User-Agent rotation only where this scope matches."),
+            ("Selected User-Agent", "user_agent_scope", "Use the selected/default User-Agent only where this scope matches."),
+        ]
+        for label_text, attr_name, tip in scope_defs:
+            group = self._make_scope_group(scope_grid, label_text, attr_name, "both", tip)
+            group.pack(fill="x", pady=4)
+            self.onion_managed_widgets.append(group)
+
+        tor_install_row = ttk.Frame(tor_frame.body)
+        tor_install_row.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(tor_install_row, text="Install Tor Python deps", command=lambda: messagebox.showinfo("Tor deps", install_tor_dependencies(log_func=self._write_log_threadsafe).get("message"))).pack(side="left")
+        ttk.Button(tor_install_row, text="Start Tor", command=self.offer_start_tor_dialog).pack(side="left", padx=(8, 0))
+        ToolTip(tor_install_row, "Use these helpers if requests[socks]/stem are missing or Tor needs to be launched manually.")
+        self.enable_onion_processing.trace_add("write", self.update_onion_settings_state)
+        self.update_onion_settings_state()
+
         action_row = ttk.Frame(content)
         action_row.pack(fill="x", padx=6, pady=(12, 8))
         ttk.Button(action_row, text="Save & Close", command=self.save_settings).pack(side="right")
@@ -912,9 +1036,11 @@ class CombinedParserGUI(RunnerMixin):
         self.install_hydra_var = tk.BooleanVar(value=True)
         self.install_zap_var = tk.BooleanVar(value=True)
         self.install_burp_var = tk.BooleanVar(value=True)
+        self.install_tor_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(checks, text="Hydra", variable=self.install_hydra_var).pack(anchor="w")
         ttk.Checkbutton(checks, text="OWASP ZAP", variable=self.install_zap_var).pack(anchor="w")
         ttk.Checkbutton(checks, text="Burp Community", variable=self.install_burp_var).pack(anchor="w")
+        ttk.Checkbutton(checks, text="Tor Python deps", variable=self.install_tor_var).pack(anchor="w")
         self.install_progress = ttk.Progressbar(frame, mode="determinate", maximum=3)
         self.install_progress.pack(fill="x", pady=(0, 4))
         self.install_status_label = ttk.Label(frame, text="Installer status: idle")
@@ -931,7 +1057,9 @@ class CombinedParserGUI(RunnerMixin):
         self.zap_status_label = ttk.Label(frame, text="ZAP: unknown")
         self.zap_status_label.pack(anchor="w")
         self.burp_status_label = ttk.Label(frame, text="Burp: unknown")
-        self.burp_status_label.pack(anchor="w", pady=(0, 8))
+        self.burp_status_label.pack(anchor="w")
+        self.tor_status_label = ttk.Label(frame, text="Tor: unknown")
+        self.tor_status_label.pack(anchor="w", pady=(0, 8))
 
         self.install_log = tk.Text(frame, height=16, wrap="word")
         self.install_log.pack(fill="both", expand=True)
@@ -944,11 +1072,14 @@ class CombinedParserGUI(RunnerMixin):
         burp_path = str(config.get('BURP_JAR', ''))
         self.zap_status_label.config(text=f"ZAP: {'Installed' if Path(zap_path).exists() else 'Missing'} at {zap_path}")
         self.burp_status_label.config(text=f"Burp: {'Installed' if Path(burp_path).exists() else 'Missing'} at {burp_path}")
+        tor_state = detect_tor_installation()
+        self.tor_status_label.config(text=f"Tor: {'Installed' if tor_state.get('ok') else 'Missing'} ({tor_state.get('message')})")
 
     def check_install_all_tools(self):
         self.install_hydra_var.set(True)
         self.install_zap_var.set(True)
         self.install_burp_var.set(True)
+        self.install_tor_var.set(True)
         self.install_selected_tools()
 
     def install_selected_tools(self):
@@ -964,6 +1095,8 @@ class CombinedParserGUI(RunnerMixin):
             tasks.append(("ZAP", install_zap))
         if self.install_burp_var.get():
             tasks.append(("Burp", install_burp))
+        if self.install_tor_var.get():
+            tasks.append(("Tor deps", install_tor_dependencies))
         self.install_progress.configure(maximum=max(len(tasks), 1), value=0)
         if not tasks:
             self.install_status_label.config(text="Installer status: no tools selected")
@@ -1072,6 +1205,86 @@ class CombinedParserGUI(RunnerMixin):
         if fp:
             self.proxy_list_file.set(fp)
 
+    def import_user_agent_list(self):
+        fp = filedialog.askopenfilename(filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not fp:
+            return
+        lines = [line.strip() for line in Path(fp).read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        added = 0
+        for ua in lines:
+            if ua not in self.user_agent_library:
+                self.user_agent_library.append(ua)
+                added += 1
+        if hasattr(self, "user_agent_dropdown"):
+            self.user_agent_dropdown.configure(values=self.user_agent_library)
+        messagebox.showinfo("User-Agent import", f"Imported {added} new User-Agent entries.")
+
+    def add_custom_user_agent(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Custom User-Agent")
+        dialog.geometry("700x240")
+        ttk.Label(dialog, text="Paste a complete browser User-Agent string. Example: Chrome/135 on Windows or Safari on iPhone.").pack(anchor="w", padx=12, pady=(12, 6))
+        entry_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=entry_var).pack(fill="x", padx=12, pady=(0, 10))
+
+        def _save():
+            ua = entry_var.get().strip()
+            if not ua:
+                messagebox.showwarning("User-Agent", "Enter a User-Agent string first.")
+                return
+            if ua not in self.user_agent_library:
+                self.user_agent_library.append(ua)
+            self.custom_user_agent.set(ua)
+            self.selected_user_agent.set(ua)
+            if hasattr(self, "user_agent_dropdown"):
+                self.user_agent_dropdown.configure(values=self.user_agent_library)
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Add User-Agent", command=_save).pack(anchor="e", padx=12, pady=(0, 12))
+
+    def _make_scope_group(self, parent, label_text, attr_name, default_value, tooltip_text):
+        frame = ttk.LabelFrame(parent, text=label_text)
+        var = tk.StringVar(value=str(config.get(attr_name, default_value)))
+        setattr(self, attr_name, var)
+        for idx, (value, text_label) in enumerate((("clear_web", "Clear Web only"), ("onion_only", "Onion only"), ("both", "Both"))):
+            rb = ttk.Radiobutton(frame, text=text_label, value=value, variable=var)
+            rb.grid(row=0, column=idx, padx=6, pady=4, sticky="w")
+            ToolTip(rb, tooltip_text)
+        return frame
+
+    def update_onion_settings_state(self, *_args):
+        enabled = bool(self.enable_onion_processing.get()) if hasattr(self, "enable_onion_processing") else bool(config.get("enable_onion_processing", False))
+        state = "normal" if enabled else "disabled"
+        for widget in getattr(self, "onion_managed_widgets", []):
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+        if hasattr(self, "nordvpn_onion_check"):
+            nord_enabled = get_vpn_control(config) == "nordvpn"
+            self.nordvpn_onion_check.configure(state=("normal" if enabled and nord_enabled else "disabled"))
+
+    def offer_start_tor_dialog(self, reason="Tor is required for .onion processing."):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Tor required")
+        dialog.geometry("520x180")
+        ttk.Label(dialog, text=reason, wraplength=480, justify="left").pack(anchor="w", padx=12, pady=(12, 8))
+        ttk.Label(dialog, text="ParserPro expects Tor SOCKS5 on 127.0.0.1:9050. Start Tor Browser/service, or click Start Tor if tor.exe is available.", wraplength=480, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+        button_row = ttk.Frame(dialog)
+        button_row.pack(fill="x", padx=12, pady=(0, 12))
+
+        def _start():
+            ok, msg, proc = start_tor_process(config)
+            if ok:
+                self.tor_process = proc
+                messagebox.showinfo("Tor", msg)
+                dialog.destroy()
+            else:
+                messagebox.showwarning("Tor", msg)
+
+        ttk.Button(button_row, text="Start Tor", command=_start).pack(side="left")
+        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side="right")
+
 
     def _toggle_exclusions_button(self, *_args):
         if hasattr(self, "exclusions_button"):
@@ -1144,6 +1357,15 @@ class CombinedParserGUI(RunnerMixin):
         config['auto_install_security_tools'] = bool(config.get("auto_install_security_tools", False))
         config['proxy_rotation'] = bool(self.proxy_rotation.get())
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
+        config['enable_onion_processing'] = bool(self.enable_onion_processing.get())
+        config['use_nordvpn_onion_only'] = bool(self.use_nordvpn_onion_only.get())
+        config['random_user_agent'] = bool(self.random_user_agent.get())
+        config['selected_user_agent'] = self.selected_user_agent.get().strip()
+        config['custom_user_agent'] = self.custom_user_agent.get().strip()
+        config['user_agent_library'] = [ua for ua in self.user_agent_library if str(ua).strip()]
+        for scope_key in RELEVANT_SCOPE_KEYS:
+            value = getattr(self, scope_key).get() if hasattr(self, scope_key) else 'both'
+            config[scope_key] = value if value in SETTING_SCOPE_OPTIONS else 'both'
         config['ignore_https_errors'] = bool(config.get('ignore_https_errors', False))
         config['debug_logging'] = bool(self.debug_logging.get())
         config['defender_exclusions_ack'] = bool(self.defender_exclusions_ack.get()) if hasattr(self, 'defender_exclusions_ack') else bool(config.get('defender_exclusions_ack', False))
@@ -1175,6 +1397,29 @@ class CombinedParserGUI(RunnerMixin):
         except Exception:
             return False
         return "connect" in help_text and "disconnect" in help_text
+
+    def ensure_nordvpn_onion_route(self):
+        if not (bool(config.get("enable_onion_processing", False)) and bool(config.get("use_nordvpn_onion_only", False))):
+            return None
+        if get_vpn_control(config) != "nordvpn":
+            return None
+        cli_path = self._resolve_nordvpn_cli()
+        if not cli_path:
+            return None
+        self._write_log_threadsafe("Switching NordVPN route to Onion group for .onion extraction...")
+        result = subprocess.run([cli_path, "connect", "--group", "Onion"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "NordVPN Onion group connect failed").strip())
+        return cli_path
+
+    def restore_nordvpn_route(self, cli_path=None):
+        if not cli_path:
+            return
+        try:
+            subprocess.run([cli_path, "connect"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+            self._write_log_threadsafe("Restored NordVPN route after .onion extraction.")
+        except Exception as exc:
+            self._write_log_threadsafe(f"Failed to restore NordVPN route: {exc}")
 
     def setup_nordvpn_proxy(self):
         if get_vpn_control(config) != "nordvpn":
@@ -2058,6 +2303,7 @@ class CombinedParserGUI(RunnerMixin):
             rows = []
             skipped = 0
             site_combos = {}
+            onion_site_combos = {}
             run_processed_sites = []
             run_fetch_ms_values = []
             run_extract_ms_values = []
@@ -2100,11 +2346,17 @@ class CombinedParserGUI(RunnerMixin):
                             if orig_url:
                                 base = get_base_url(orig_url)
                                 if base:
+                                    if is_onion_url(base):
+                                        if not bool(config.get("enable_onion_processing", False)):
+                                            self._write_log_threadsafe(f"Skipping onion URL while disabled: {base}")
+                                            skipped += 1
+                                            continue
+                                        onion_site_combos.setdefault(base, set()).add(f"{user}:{pw}")
                                     site_combos.setdefault(base, set()).add(f"{user}:{pw}")
                             else:
                                 skipped += 1
 
-            self._write_log_threadsafe(f"Main CSV: {len(rows)} rows | {skipped} skipped")
+            self._write_log_threadsafe(f"Main CSV: {len(rows)} rows | {skipped} skipped | onion sites={len(onion_site_combos)}")
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -2148,10 +2400,17 @@ class CombinedParserGUI(RunnerMixin):
             if config.get("proxy_url", "").strip() and not proxy:
                 self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"proxy_url": config.get("proxy_url", "").strip()})
 
+            if bool(config.get("enable_onion_processing", False)) and onion_site_combos and not is_tor_running():
+                self.ui_queue.put(("status_text", "Tor is required for onion extraction."))
+                self.root.after(0, lambda: self.offer_start_tor_dialog(reason="Tor proxy is required before this run can process .onion targets."))
+                raise RuntimeError("Tor is required for onion extraction but is not running on 127.0.0.1:9050")
+
             if self.extract_forms.get() and site_combos:
                 site_list = []
                 cache_skipped = 0
                 for base in site_combos:
+                    if is_onion_url(base) and not bool(config.get("enable_onion_processing", False)):
+                        continue
                     skip_reason = self._cache_skip_reason(base, retry_failed_only=retry_failed_only)
                     if skip_reason:
                         if skip_reason == "already cached":
@@ -2209,16 +2468,28 @@ class CombinedParserGUI(RunnerMixin):
                             urls_to_try.append(f"{clean_base}{path}")
 
                     error_info = {"status": "failed", "error_message": "unknown"}
-                    current_proxy = self.proxy_manager.get_proxy() if self.proxy_manager else proxy
+                    current_proxy = self.proxy_manager.get_proxy() if (self.proxy_manager and scope_applies(config.get("proxy_scope", "both"), base)) else proxy
+                    nordvpn_onion_cli = None
+                    if is_onion_url(base):
+                        if not is_tor_running():
+                            return {"status": "fetch_failed", "error_code": "tor_error", "error_hint": "Tor is not running", "error_detail": "Start Tor Browser or tor service on 127.0.0.1:9050"}
+                        nordvpn_onion_cli = self.ensure_nordvpn_onion_route()
+                        onion_status = classify_onion_reachability(base, user_agent=resolve_user_agent(config, target_url=base))
+                        self.processed_data.setdefault(base, {})["onion_status"] = onion_status
+                        if onion_status.get("status") == "tor_error":
+                            self.restore_nordvpn_route(nordvpn_onion_cli)
+                            return {"status": "fetch_failed", "error_code": "tor_error", "error_hint": "Tor is not running", "error_detail": onion_status.get("detail")}
                     for url in urls_to_try:
                         if not url:
                             continue
                         start_fetch = time.perf_counter()
+                        effective_strict_validation = bool(self.strict_validation.get()) if scope_applies(config.get("validation_scope", "both"), url) else False
+                        mode_value = "playwright" if (is_onion_url(url) or self.use_playwright_dynamic.get()) else str(config.get("analysis_mode", "static") or "static")
                         form_data, error_info = extract_login_form(
                             url,
                             current_proxy,
-                            strict_validation=self.strict_validation.get(),
-                            mode=("playwright" if self.use_playwright_dynamic.get() else str(config.get("analysis_mode", "static") or "static")),
+                            strict_validation=effective_strict_validation,
+                            mode=mode_value,
                             advanced_mode=bool(self.advanced_extraction_mode.get()),
                             observation_options={
                                 "enable_dummy_interaction": bool(config.get("observation_enable_dummy_interaction", False)),
@@ -2227,9 +2498,13 @@ class CombinedParserGUI(RunnerMixin):
                         )
                         run_fetch_ms_values.append((time.perf_counter() - start_fetch) * 1000)
                         if form_data:
+                            if nordvpn_onion_cli:
+                                self.restore_nordvpn_route(nordvpn_onion_cli)
                             return {"status": form_data.get("status", "success_loginish"), "form": form_data, "used_url": url}
 
                         if isinstance(error_info, dict) and error_info.get("status") == "skipped_invalid_target":
+                            if nordvpn_onion_cli:
+                                self.restore_nordvpn_route(nordvpn_onion_cli)
                             return error_info
                         if isinstance(error_info, dict) and error_info.get("status") in {"fetch_failed", "failed"}:
                             continue
@@ -2237,10 +2512,14 @@ class CombinedParserGUI(RunnerMixin):
                             continue
 
                     rotation_counter += 1
+                    if nordvpn_onion_cli:
+                        self.restore_nordvpn_route(nordvpn_onion_cli)
                     return error_info if isinstance(error_info, dict) else {"status": "failed", "error_message": str(error_info or "unknown")}
 
-                timeout_seconds = max(300, int(config.get("extract_site_timeout_seconds", 300) or 300))  # FIXED: 5-minute per-site timeout
-                executor = ThreadPoolExecutor(max_workers=self.threads.get())
+                timeout_seconds = max(45, int(config.get("extract_site_timeout_seconds", 300) or 300))  # FIXED: per-site timeout with Tor floor
+                clear_web_workers = self.threads.get() if scope_applies(config.get("threads_scope", "both"), "https://example.com") else 1
+                onion_workers = self.threads.get() if scope_applies(config.get("threads_scope", "both"), "http://example.onion") else 1
+                executor = ThreadPoolExecutor(max_workers=max(1, min(self.threads.get(), onion_workers if onion_site_combos else clear_web_workers)))
                 try:
                     future_to_base = {executor.submit(extract_for_site, base): base for base in site_list}
                     pending = set(future_to_base)
@@ -2334,6 +2613,7 @@ class CombinedParserGUI(RunnerMixin):
                                     entry.update({
                                         "status": status,
                                         "form_found": status == "success_form",
+                                        "onion_status": entry.get("onion_status") if is_onion_url(base) else entry.get("onion_status"),
                                         "last_error_code": None,
                                         "last_error_hint": None,
                                         "last_error_detail": None,
@@ -2355,7 +2635,7 @@ class CombinedParserGUI(RunnerMixin):
                                         },
                                     })
                                     reason = form.get('validation_reason') or form.get('reasons') or 'ok'
-                                    self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason}")
+                                    self._write_log_threadsafe(f"{base} :: status={status} confidence={form.get('confidence', 0)} reason={reason} ua={form.get('user_agent', resolve_user_agent(config, target_url=base))}")
                                     if form.get('method') == 'get':
                                         self._write_log_threadsafe(f"{base} :: WARN GET login form detected; using built-in Hydra GET tuning profile")
                                 elif status == "skipped_invalid_target":
