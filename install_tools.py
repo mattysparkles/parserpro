@@ -1,9 +1,11 @@
+import importlib.util
 import os
 import platform
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import traceback
 import webbrowser
@@ -166,23 +168,51 @@ def install_hydra(log_func=None):
         return {"ok": False, "path": None, "message": f"Hydra Windows install failed: {exc}"}
 
 
-def install_tor_dependencies(log_func=None):
+TOR_DEPENDENCY_MODULES = {"stem": "stem", "requests[socks]": "requests", "pysocks": "socks"}
+
+
+def get_missing_tor_dependencies(module_finder=None):
+    finder = module_finder or importlib.util.find_spec
+    missing = []
+    for package_name, module_name in TOR_DEPENDENCY_MODULES.items():
+        if finder(module_name) is None:
+            missing.append(package_name)
+    return missing
+
+
+def install_tor_dependencies(log_func=None, missing_packages=None):
+    missing = list(missing_packages) if missing_packages is not None else get_missing_tor_dependencies()
+    if not missing:
+        message = "Tor Python dependencies already installed"
+        if log_func:
+            log_func(message)
+        return {"ok": True, "message": message, "installed": False, "missing": []}
+
     commands = [
-        ["python", "-m", "pip", "install", "stem", "requests[socks]", "pysocks"],
+        [sys.executable, "-m", "pip", "install", *missing],
     ]
     last_message = ""
     for cmd in commands:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
             if result.returncode == 0:
-                message = "Installed Tor Python dependencies (stem, requests[socks], pysocks)"
+                message = f"Installed Tor Python dependencies ({', '.join(missing)})"
                 if log_func:
                     log_func(message)
-                return {"ok": True, "message": message}
+                return {"ok": True, "message": message, "installed": True, "missing": missing}
             last_message = (result.stderr or result.stdout or "pip failed").strip()
         except Exception as exc:
             last_message = str(exc)
-    return {"ok": False, "message": f"Tor dependency install failed: {last_message}"}
+    return {"ok": False, "message": f"Tor dependency install failed: {last_message}", "installed": False, "missing": missing}
+
+
+def ensure_tor_dependencies(log_func=None):
+    missing = get_missing_tor_dependencies()
+    if not missing:
+        return {"ok": True, "message": "Tor Python dependencies already installed", "installed": False, "missing": []}
+    if log_func:
+        log_func(f"Missing Tor Python dependencies detected: {', '.join(missing)}")
+    return install_tor_dependencies(log_func=log_func, missing_packages=missing)
 
 
 def detect_tor_installation():

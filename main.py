@@ -31,6 +31,7 @@ from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config, normalize_
 from extract import extract_login_form
 from fetch import HAS_DEATHBYCAPTCHA
 from helpers import classify_onion_reachability, get_base_url, get_site_filename, is_onion_url, is_tor_running, normalize_site, split_three_fields, start_tor_process
+from install_tools import ensure_tor_dependencies
 from gui import CombinedParserGUI
 from logging import write_detailed, write_privacy
 
@@ -194,6 +195,12 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
         _log_note(notes, f"Playwright check: {playwright_msg}", logger)
     else:
         notes.append(f"Playwright setup warning: {playwright_msg}")
+
+    tor_deps_status = ensure_tor_dependencies(log_func=(logger.info if logger else None))
+    if tor_deps_status.get("ok"):
+        _log_note(notes, f"Tor dependency check: {tor_deps_status.get('message')}", logger)
+    else:
+        notes.append(f"Tor dependency setup warning: {tor_deps_status.get('message')}")
 
     log_optional_dbc_status_once()
 
