@@ -166,6 +166,53 @@ def install_hydra(log_func=None):
         return {"ok": False, "path": None, "message": f"Hydra Windows install failed: {exc}"}
 
 
+def install_tor_dependencies(log_func=None):
+    commands = [
+        ["python", "-m", "pip", "install", "stem", "requests[socks]", "pysocks"],
+    ]
+    last_message = ""
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
+            if result.returncode == 0:
+                message = "Installed Tor Python dependencies (stem, requests[socks], pysocks)"
+                if log_func:
+                    log_func(message)
+                return {"ok": True, "message": message}
+            last_message = (result.stderr or result.stdout or "pip failed").strip()
+        except Exception as exc:
+            last_message = str(exc)
+    return {"ok": False, "message": f"Tor dependency install failed: {last_message}"}
+
+
+def detect_tor_installation():
+    candidates = [
+        shutil.which("tor"),
+        shutil.which("tor.exe"),
+        r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
+    ]
+    for candidate in candidates:
+        if candidate and (os.path.sep not in str(candidate) or Path(candidate).exists()):
+            return {"ok": True, "path": str(candidate), "message": f"Tor found at {candidate}"}
+    return {"ok": False, "path": None, "message": "Tor not found. Download Tor Browser: https://www.torproject.org/download/"}
+
+
+def check_nordvpn_onion_support(log_func=None):
+    candidate = shutil.which("nordvpn") or shutil.which("nordvpncli")
+    if not candidate:
+        return {"ok": False, "message": "NordVPN CLI not found"}
+    try:
+        result = subprocess.run([candidate, "groups"], capture_output=True, text=True, check=False, timeout=20)
+        text = f"{result.stdout}\n{result.stderr}".lower()
+        ok = "onion" in text
+        message = "NordVPN Onion group available" if ok else "NordVPN CLI detected, but Onion group not listed"
+        if log_func:
+            log_func(message)
+        return {"ok": ok, "message": message}
+    except Exception as exc:
+        return {"ok": False, "message": f"NordVPN Onion group check failed: {exc}"}
+
+
 def install_zap(log_func=None):
     ZAP_DIR.mkdir(parents=True, exist_ok=True)
     existing_jar = ZAP_DIR / "ZAP.jar"

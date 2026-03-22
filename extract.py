@@ -12,8 +12,10 @@ except ImportError:
 
 from config import config, get_intercept_proxy
 from fetch import HAS_PLAYWRIGHT, HAS_SELENIUM, fetch_page_playwright, fetch_page_requests, fetch_page_selenium, solve_captcha
-from helpers import COMMON_LOGIN_PATHS, get_base_url, normalize_and_validate_target, validate_url
+from helpers import COMMON_LOGIN_PATHS, classify_onion_reachability, get_base_url, get_scoped_value, is_onion_url, normalize_and_validate_target, redact_onion_value, resolve_user_agent, scope_applies, validate_url
+from logging import write_detailed, write_privacy
 from login_tester import domain_from_url, hydra_module_for_method, hydra_runtime_flags_for_method, save_hit
+from tor_fetch import fetch_onion_html
 
 
 def detect_failure_string(soup, url):
@@ -318,15 +320,19 @@ def _loginish_paths_from_links(soup, page_url, limit=3):
 
 
 def _fetch_html_for_mode(url, proxy, mode):
-    preferred = (mode or "static").strip().lower()
-    attempts = []
-    if preferred == "playwright":
-        attempts = [fetch_page_playwright, fetch_page_requests, fetch_page_selenium]
-    else:
-        attempts = [fetch_page_requests, fetch_page_playwright, fetch_page_selenium]
+    if is_onion_url(url):
+        timeout_seconds = int(get_scoped_value(config, "extract_site_timeout_seconds", 45, target_url=url, scope_key="timeout_scope") or 45)
+        user_agent = resolve_user_agent(config, target_url=url)
+        html, error, used_ua, used_playwright = fetch_onion_html(url, timeout_seconds=max(45, timeout_seconds), user_agent=user_agent)
+        if html:
+            return html, None, bool(used_playwright), used_ua
+        return None, error, bool(used_playwright), used_ua
 
+    preferred = (mode or "static").strip().lower()
+    attempts = [fetch_page_playwright, fetch_page_requests, fetch_page_selenium] if preferred == "playwright" else [fetch_page_requests, fetch_page_playwright, fetch_page_selenium]
     last_error = None
     used_playwright = False
+    used_ua = resolve_user_agent(config, target_url=url)
     for fetcher in attempts:
         if fetcher == fetch_page_playwright and not HAS_PLAYWRIGHT:
             continue
@@ -336,9 +342,9 @@ def _fetch_html_for_mode(url, proxy, mode):
         if fetcher == fetch_page_playwright:
             used_playwright = bool(html)
         if html:
-            return html, None, used_playwright
+            return html, None, used_playwright, used_ua
         last_error = error
-    return None, last_error, used_playwright
+    return None, last_error, used_playwright, used_ua
 
 
 
@@ -414,7 +420,15 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
     if not url:
         return None, {"status": "skipped_invalid_target", "reason": invalid_reason or "invalid target"}
 
-    html, error, used_playwright = _fetch_html_for_mode(url, proxy, mode)
+    if is_onion_url(url) and not bool(config.get("enable_onion_processing", False)):
+        return None, {"status": "skipped_disabled", "reason": ".onion processing disabled"}
+
+    if is_onion_url(url):
+        reachability = classify_onion_reachability(url, user_agent=resolve_user_agent(config, target_url=url))
+        if reachability.get("status") == "tor_error":
+            return None, {"status": "fetch_failed", "error_code": "tor_error", "error_hint": "Tor is not running", "error_detail": reachability.get("detail", "Tor not running")}
+
+    html, error, used_playwright, used_user_agent = _fetch_html_for_mode(url, proxy, mode)
     fallback_used = False
 
     if not html:
@@ -445,7 +459,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
             if adv_url in checked_urls:
                 continue
             checked_urls.append(adv_url)
-            html_adv, _, used_pw_adv = _fetch_html_for_mode(adv_url, proxy, "playwright")
+            html_adv, _, used_pw_adv, _ = _fetch_html_for_mode(adv_url, proxy, "playwright")
             used_playwright = used_playwright or used_pw_adv
             if not html_adv:
                 continue
@@ -467,7 +481,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
                 continue
             seen.add(candidate)
             checked_urls.append(candidate)
-            html2, error2, used_pw2 = _fetch_html_for_mode(candidate, proxy, mode)
+            html2, error2, used_pw2, _ = _fetch_html_for_mode(candidate, proxy, mode)
             used_playwright = used_playwright or used_pw2
             if not html2:
                 continue
@@ -593,6 +607,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
         "classification": "✅ actionable native form" if status == "success_form" else "🟨 login-ish (JS-handled / non-POST / missing action)",
         "method_warning": "Detected GET form; payload may need manual tuning" if method == "get" else "",
         "custom_tester_required": custom_tester_required,
+        "user_agent": used_user_agent,
         "login_metadata": {
             "page_url": url,
             "fields": best_candidate["fields"],
@@ -611,6 +626,9 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
             enable_dummy_interaction=bool(opts.get("enable_dummy_interaction", False)),
         )
 
+    log_message = f"Extracted login form {url} status={result.get('status')} ua={used_user_agent}"
+    write_detailed(log_message)
+    write_privacy(redact_onion_value(log_message))
     return result, None
 
 

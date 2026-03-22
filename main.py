@@ -30,7 +30,7 @@ except ImportError:
 from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config, normalize_proxy, proxy_is_reachable, save_config
 from extract import extract_login_form
 from fetch import HAS_DEATHBYCAPTCHA
-from helpers import get_base_url, get_site_filename, normalize_site, split_three_fields
+from helpers import classify_onion_reachability, get_base_url, get_site_filename, is_onion_url, is_tor_running, normalize_site, split_three_fields, start_tor_process
 from gui import CombinedParserGUI
 from logging import write_detailed, write_privacy
 
@@ -213,6 +213,24 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
         except Exception:
             pass
 
+    if bool(config.get("enable_onion_processing", False)):
+        if is_tor_running():
+            _log_note(notes, "Tor proxy check passed on 127.0.0.1:9050.", logger)
+        else:
+            warn = "Tor proxy required for .onion processing but not running on 127.0.0.1:9050."
+            notes.append(warn)
+            if show_dialogs and not logger:
+                root = tk.Toplevel() if tk._default_root else None
+                if root:
+                    root.withdraw()
+                if messagebox.askyesno("Tor required", f"{warn}\n\nTry starting Tor now?"):
+                    ok, msg, _ = start_tor_process(config)
+                    notes.append(msg)
+                elif root:
+                    messagebox.showinfo("Tor required", "Start Tor Browser or tor service, then rerun ParserPro.")
+                if root:
+                    root.destroy()
+
     return notes
 
 def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) -> int:
@@ -229,8 +247,12 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
         rows.append(parts)
         site = normalize_site(parts[0])
         base = get_base_url(site) if site else None
-        if base:
-            site_combos.setdefault(base, set()).add(f"{parts[1]}:{parts[2]}")
+        if not base:
+            continue
+        if is_onion_url(base) and not bool(config.get("enable_onion_processing", False)):
+            logger.info("skipping onion url while disabled: %s", base)
+            continue
+        site_combos.setdefault(base, set()).add(f"{parts[1]}:{parts[2]}")
 
     for base, combos in site_combos.items():
         combo_path = DATA_DIR / get_site_filename(base)
@@ -238,7 +260,12 @@ def run_headless_extract(input_path: Path, forms_output: Path, run_hydra: bool) 
 
     forms = []
     for base in sorted(site_combos.keys()):
-        form_data, error = extract_login_form(base, strict_validation=True, mode=str(config.get("analysis_mode", "static")))
+        if is_onion_url(base):
+            reachability = classify_onion_reachability(base)
+            if reachability.get("status") == "tor_error":
+                logger.warning("onion tor error: %s :: %s", base, reachability)
+                continue
+        form_data, error = extract_login_form(base, strict_validation=True, mode=("playwright" if is_onion_url(base) else str(config.get("analysis_mode", "static"))))
         if form_data and form_data.get("hydra_command_template"):
             forms.append(
                 {
