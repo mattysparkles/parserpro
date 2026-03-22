@@ -32,6 +32,8 @@ _APP_ROOT = Path(__file__).resolve().parent
 _LOG_DIR = _APP_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _DOMAIN_RE = re.compile(r"https?://[^/]+")
+_ONION_RE = re.compile(r"([a-z2-7]{16,56}\.onion)", re.IGNORECASE)
+_ONION_REDACTION_HOST = "genericonionexample.onion"
 
 
 def _log_file(prefix: str) -> Path:
@@ -39,7 +41,8 @@ def _log_file(prefix: str) -> Path:
 
 
 def _sanitize_domains(message: str) -> str:
-    return _DOMAIN_RE.sub("genericexamplewebsite.com", message or "")
+    sanitized = _ONION_RE.sub(_ONION_REDACTION_HOST, message or "")
+    return _DOMAIN_RE.sub("genericexamplewebsite.com", sanitized)
 
 
 # FIXED: required helper names and log file format
