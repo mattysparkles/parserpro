@@ -248,10 +248,12 @@ def offer_tor_browser_install(log_func=None):
     return {"ok": False, "message": message, "download_url": TOR_BROWSER_DOWNLOAD_URL}
 
 
-def check_nordvpn_onion_support(log_func=None):
-    candidate = shutil.which("nordvpn") or shutil.which("nordvpncli")
+def check_nordvpn_onion_support(log_func=None, probe_groups=False, cli_path=None):
+    candidate = cli_path or shutil.which("nordvpn") or shutil.which("nordvpncli")
     if not candidate:
         return {"ok": False, "message": "NordVPN CLI not found"}
+    if not probe_groups:
+        return {"ok": True, "message": "NordVPN CLI detected"}
     try:
         result = subprocess.run([candidate, "groups"], capture_output=True, text=True, check=False, timeout=20)
         text = f"{result.stdout}\n{result.stderr}".lower()

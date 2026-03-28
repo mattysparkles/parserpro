@@ -625,19 +625,18 @@ def check_and_setup_hydra(log_func=None):
     return {"success": False, "available": False, "mode": None, "message": manual, "logs": logs, "status": "missing"}
 
 
-def ensure_nordvpn_cli(log_func=None):
+def ensure_nordvpn_cli(log_func=None, auto_open_download_page=False):
     """Resolve NordVPN CLI path on Windows and optionally add install directory to PATH."""
-    candidates = [
-        shutil.which("nordvpn"),
-        shutil.which("nordvpncli"),
+    discovered = [shutil.which("nordvpn"), shutil.which("nordvpncli")]
+    fallback_paths = [
         r"C:\Program Files\NordVPN\nordvpn.exe",
         r"C:\Program Files\NordVPN\NordVPN.exe",
     ]
-    for candidate in candidates:
+    for candidate in [*discovered, *fallback_paths]:
         if not candidate:
             continue
         path_obj = Path(candidate)
-        if not path_obj.exists() and os.path.sep in str(candidate):
+        if candidate in fallback_paths and not path_obj.exists():
             continue
         if os.name == "nt" and bool(config.get("auto_configure_nordvpn_path", True)):
             path_result = _add_dir_to_path_windows(path_obj.parent)
@@ -646,11 +645,14 @@ def ensure_nordvpn_cli(log_func=None):
         return {"available": True, "path": str(path_obj)}
 
     if log_func:
-        log_func("NordVPN CLI not found. Opening download page for installation.")
-    try:
-        webbrowser.open("https://nordvpn.com/download/windows/")
-    except Exception:
-        pass
+        log_func("NordVPN CLI not found.")
+    if auto_open_download_page:
+        if log_func:
+            log_func("Opening NordVPN download page for installation.")
+        try:
+            webbrowser.open("https://nordvpn.com/download/windows/")
+        except Exception:
+            pass
     return {"available": False, "path": None}
 
 
