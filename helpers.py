@@ -165,26 +165,35 @@ def tor_proxy_dict():
 
 
 def is_tor_running(host: str = TOR_SOCKS_HOST, port: int = TOR_SOCKS_PORT, timeout: float = 1.5) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+    from tor_manager import is_tor_running as _is_tor_running
+
+    return _is_tor_running(port=port, host=host, timeout=timeout)
 
 
 def get_tor_launch_candidates(cfg=None):
+    from tor_manager import detect_tor_executable
+
     cfg = cfg or {}
     candidates = []
     configured = str(cfg.get("tor_executable_path", "")).strip()
     if configured:
         candidates.append(configured)
+    detected = detect_tor_executable()
+    if detected:
+        candidates.append(detected)
     candidates.extend([
         shutil_which("tor"),
         shutil_which("tor.exe"),
-        r"C:\\Program Files\\Tor Browser\\Browser\\TorBrowser\\Tor\\tor.exe",
-        r"C:\\Program Files\\Tor Browser\\Browser\\TorBrowser\\Tor\\tor.real.exe",
+        r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
+        r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.real.exe",
     ])
-    return [c for c in candidates if c]
+    out = []
+    seen = set()
+    for c in candidates:
+        if c and str(c).lower() not in seen:
+            seen.add(str(c).lower())
+            out.append(c)
+    return out
 
 
 def shutil_which(name: str):
@@ -196,17 +205,11 @@ def shutil_which(name: str):
 
 
 def start_tor_process(cfg=None):
-    for candidate in get_tor_launch_candidates(cfg):
-        path = Path(candidate)
-        if os.path.sep in candidate and not path.exists():
-            continue
-        try:
-            proc = subprocess.Popen([str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True, f"Started Tor using {path}", proc
-        except Exception as exc:
-            write_detailed(f"Tor start failed for {candidate}: {exc}", level="WARN")
-            write_privacy(redact_onion_value(f"Tor start failed for {candidate}: {exc}"), level="WARN")
-    return False, "Tor executable not found. Install Tor Browser/service or configure tor_executable_path.", None
+    from tor_manager import start_tor
+
+    cfg = cfg or {}
+    tor_path = str(cfg.get("tor_executable_path", "")).strip() or None
+    return start_tor(tor_path=tor_path, socks_port=TOR_SOCKS_PORT)
 
 
 def classify_onion_reachability(url: str, user_agent: str | None = None, timeout: int = 45):

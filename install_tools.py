@@ -29,6 +29,7 @@ HYDRA_WINDOWS_FALLBACK = "https://github.com/maaaaz/thc-hydra-windows/releases/d
 ZAP_LATEST_RELEASE_URL = "https://github.com/zaproxy/zaproxy/releases/latest"
 BURP_RELEASE_PAGE = "https://portswigger.net/burp/releases/community/latest"
 BURP_COMMUNITY_DOWNLOAD_PAGE = "https://portswigger.net/burp/communitydownload"
+TOR_BROWSER_DOWNLOAD_URL = "https://www.torproject.org/download/"
 
 
 def _session() -> requests.Session:
@@ -216,15 +217,35 @@ def ensure_tor_dependencies(log_func=None):
 
 
 def detect_tor_installation():
-    candidates = [
-        shutil.which("tor"),
-        shutil.which("tor.exe"),
-        r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
-    ]
-    for candidate in candidates:
-        if candidate and (os.path.sep not in str(candidate) or Path(candidate).exists()):
-            return {"ok": True, "path": str(candidate), "message": f"Tor found at {candidate}"}
-    return {"ok": False, "path": None, "message": "Tor not found. Download Tor Browser: https://www.torproject.org/download/"}
+    from tor_manager import detect_tor_executable
+
+    detected = detect_tor_executable()
+    if detected:
+        return {"ok": True, "path": str(detected), "message": f"Tor found at {detected}"}
+    return {
+        "ok": False,
+        "path": None,
+        "message": f"Tor not found. Download Tor Browser: {TOR_BROWSER_DOWNLOAD_URL}",
+        "download_url": TOR_BROWSER_DOWNLOAD_URL,
+        "instructions": "Install Tor Browser, then set Tor Executable Path to Browser\\TorBrowser\\Tor\\tor.exe.",
+    }
+
+
+def offer_tor_browser_install(log_func=None):
+    state = detect_tor_installation()
+    if state.get("ok"):
+        return state
+    message = (
+        "Tor Browser is missing. Download and install from "
+        f"{TOR_BROWSER_DOWNLOAD_URL}. After install, set tor.exe path in Settings > Tor / Onion."
+    )
+    if log_func:
+        log_func(message)
+    try:
+        webbrowser.open(TOR_BROWSER_DOWNLOAD_URL)
+    except Exception:
+        pass
+    return {"ok": False, "message": message, "download_url": TOR_BROWSER_DOWNLOAD_URL}
 
 
 def check_nordvpn_onion_support(log_func=None):
