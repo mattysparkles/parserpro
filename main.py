@@ -30,8 +30,9 @@ except ImportError:
 from config import DATA_DIR, LOGS_DIR, check_and_setup_hydra, config, normalize_proxy, proxy_is_reachable, save_config
 from extract import extract_login_form
 from fetch import HAS_DEATHBYCAPTCHA
-from helpers import classify_onion_reachability, get_base_url, get_site_filename, is_onion_url, is_tor_running, normalize_site, split_three_fields, start_tor_process
-from install_tools import ensure_tor_dependencies
+from helpers import classify_onion_reachability, get_base_url, get_site_filename, is_onion_url, normalize_site, split_three_fields
+from install_tools import detect_tor_installation, ensure_tor_dependencies, offer_tor_browser_install
+from tor_manager import is_tor_running, start_tor
 from gui import CombinedParserGUI
 from logging import write_detailed, write_privacy
 
@@ -202,6 +203,15 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
     else:
         notes.append(f"Tor dependency setup warning: {tor_deps_status.get('message')}")
 
+    tor_install = detect_tor_installation()
+    if tor_install.get("ok"):
+        _log_note(notes, f"Tor binary check: {tor_install.get('message')}", logger)
+        if not config.get("tor_executable_path"):
+            config["tor_executable_path"] = tor_install.get("path") or ""
+    else:
+        notes.append(f"Tor binary missing: {tor_install.get('message')}")
+        offer_tor_browser_install(log_func=(logger.info if logger else None))
+
     log_optional_dbc_status_once()
 
     nord_candidates = [
@@ -231,7 +241,7 @@ def check_and_setup_prerequisites(logger: logging.Logger | None = None, show_dia
                 if root:
                     root.withdraw()
                 if messagebox.askyesno("Tor required", f"{warn}\n\nTry starting Tor now?"):
-                    ok, msg, _ = start_tor_process(config)
+                    ok, msg, _ = start_tor(str(config.get("tor_executable_path", "")).strip() or None, socks_port=int(config.get("tor_socks_port", 9050) or 9050))
                     notes.append(msg)
                 elif root:
                     messagebox.showinfo("Tor required", "Start Tor Browser or tor service, then rerun ParserPro.")

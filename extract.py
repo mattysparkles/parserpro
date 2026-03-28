@@ -122,16 +122,17 @@ def infer_submit_mode(form, page_url, action_url):
 
 
 def _is_login_like_form(form):
-    pwd = form.find("input", {"type": "password"})
-    if not pwd:
-        return False
-
-    text_like_inputs = form.find_all("input", {"type": ["text", "email", "tel", ""]})
-    if text_like_inputs:
-        return True
-
+    login_keywords = ["login", "log in", "log-in", "signin", "sign in", "auth", "account", "username", "email", "password", "pass", "submit", "btn"]
+    fields_blob = " ".join(
+        str(inp.get("name") or "") + " " + str(inp.get("id") or "") + " " + str(inp.get("placeholder") or "")
+        for inp in form.find_all("input")
+    ).lower()
     form_text = form.get_text(" ", strip=True).lower()
-    return any(k in form_text for k in ["login", "log in", "sign in", "password", "username", "email"])
+    has_password = bool(form.find("input", {"type": "password"})) or any(k in fields_blob for k in ["pass", "pwd"])
+    has_user_hint = any(k in fields_blob for k in ["user", "email", "login", "account"]) or bool(form.find_all("input", {"type": ["text", "email", "tel", ""]}))
+    if has_password and has_user_hint:
+        return True
+    return any(k in f"{fields_blob} {form_text}" for k in login_keywords)
 
 
 def _form_field_metadata(form):
@@ -321,11 +322,16 @@ def _loginish_paths_from_links(soup, page_url, limit=3):
 
 def _fetch_html_for_mode(url, proxy, mode):
     if is_onion_url(url):
-        timeout_seconds = int(get_scoped_value(config, "extract_site_timeout_seconds", 45, target_url=url, scope_key="timeout_scope") or 45)
+        timeout_seconds = int(get_scoped_value(config, "extract_site_timeout_seconds", 90, target_url=url, scope_key="timeout_scope") or 90)
         user_agent = resolve_user_agent(config, target_url=url)
-        html, error, used_ua, used_playwright = fetch_onion_html(url, timeout_seconds=max(45, timeout_seconds), user_agent=user_agent)
+        html, error, used_ua, used_playwright = fetch_onion_html(url, timeout_seconds=max(90, timeout_seconds), user_agent=user_agent)
         if html:
             return html, None, bool(used_playwright), used_ua
+        if HAS_SELENIUM:
+            html_sel, sel_error = fetch_page_selenium(url, {"server": "socks5://127.0.0.1:9050"})
+            if html_sel:
+                return html_sel, None, False, used_ua
+            error = sel_error or error
         return None, error, bool(used_playwright), used_ua
 
     preferred = (mode or "static").strip().lower()
@@ -424,7 +430,11 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
         return None, {"status": "skipped_disabled", "reason": ".onion processing disabled"}
 
     if is_onion_url(url):
-        reachability = classify_onion_reachability(url, user_agent=resolve_user_agent(config, target_url=url))
+        from tor_manager import is_tor_running, start_tor
+
+        if not is_tor_running(port=int(config.get("tor_socks_port", 9050) or 9050)) and bool(config.get("auto_launch_tor", True)):
+            start_tor(str(config.get("tor_executable_path", "")).strip() or None, socks_port=int(config.get("tor_socks_port", 9050) or 9050))
+        reachability = classify_onion_reachability(url, user_agent=resolve_user_agent(config, target_url=url), timeout=90)
         if reachability.get("status") == "tor_error":
             return None, {"status": "fetch_failed", "error_code": "tor_error", "error_hint": "Tor is not running", "error_detail": reachability.get("detail", "Tor not running")}
 
@@ -494,7 +504,7 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
                 break
 
     if not best_candidate:
-        return None, {"status": "no_form", "reason": "no login-like form detected", "checked_urls": checked_urls}
+        return None, {"status": "no_form", "reason": "no login-like form detected (lenient onion-aware heuristics)", "checked_urls": checked_urls}
 
     best_form = best_candidate["form"]
     best_confidence = best_candidate["confidence"]
@@ -507,20 +517,38 @@ def extract_login_form(url, proxy=None, strict_validation=True, mode="static", a
     username_field = None
     password_field = None
 
+    priority_user = []
+    other_inputs = []
     for inp in best_form.find_all("input"):
         name = inp.get("name")
         if not name:
             continue
         typ = inp.get("type", "text").lower()
+        lname = name.lower()
 
-        if typ == "password":
-            password_field = name
+        if typ == "password" or any(k in lname for k in ["pass", "pwd"]):
+            if not password_field:
+                password_field = name
             post_parts.append(f"{name}=^PASS^")
-        elif typ in ["text", "email"] and not username_field:
-            username_field = name
-            post_parts.append(f"{name}=^USER^")
-        elif typ not in ["submit", "button", "hidden"]:
+            continue
+
+        if typ in ["text", "email", "tel", ""]:
+            if any(k in lname for k in ["user", "email", "login", "account"]):
+                priority_user.append(name)
+            else:
+                other_inputs.append(name)
+            continue
+
+        if typ not in ["submit", "button", "hidden"]:
             post_parts.append(f"{name}=")
+
+    if not username_field:
+        if priority_user:
+            username_field = priority_user[0]
+        elif other_inputs:
+            username_field = other_inputs[0]
+        if username_field:
+            post_parts.append(f"{username_field}=^USER^")
 
     for h in best_form.find_all("input", {"type": "hidden"}):
         n = h.get("name")

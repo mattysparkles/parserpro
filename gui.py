@@ -25,7 +25,8 @@ from extract import extract_login_form, test_credentials_for_site
 from burp import BURP_DOWNLOAD_URL, launch_burp, run_burp_with_project
 from zap import import_data_to_zap, launch_zap, run_zap_active_scan
 from install_tools import check_nordvpn_onion_support, detect_tor_installation, install_burp, install_hydra, install_tor_dependencies, install_zap
-from helpers import COMMON_LOGIN_PATHS, RELEVANT_SCOPE_KEYS, SETTING_SCOPE_OPTIONS, classify_onion_reachability, get_base_url, get_scoped_value, get_site_filename, get_user_agent_library, is_onion_url, is_tor_running, log_once, normalize_and_validate_target, normalize_site, resolve_user_agent, scope_applies, split_three_fields, start_tor_process
+from helpers import COMMON_LOGIN_PATHS, RELEVANT_SCOPE_KEYS, SETTING_SCOPE_OPTIONS, classify_onion_reachability, get_base_url, get_scoped_value, get_site_filename, get_user_agent_library, is_onion_url, log_once, normalize_and_validate_target, normalize_site, resolve_user_agent, scope_applies, split_three_fields
+from tor_manager import detect_tor_executable, is_tor_running, start_tor, stop_tor
 from runner import RunnerMixin
 from proxies import ProxyManager
 from project_io import (
@@ -133,6 +134,8 @@ class CombinedParserGUI(RunnerMixin):
         self.proxy_url = tk.StringVar(value=config.get("proxy_url", ""))
         self.enable_onion_processing = tk.BooleanVar(value=bool(config.get("enable_onion_processing", False)))
         self.use_nordvpn_onion_only = tk.BooleanVar(value=bool(config.get("use_nordvpn_onion_only", False)))
+        self.auto_launch_tor = tk.BooleanVar(value=bool(config.get("auto_launch_tor", True)))
+        self.tor_executable_path = tk.StringVar(value=str(config.get("tor_executable_path", "") or detect_tor_executable()))
         self.random_user_agent = tk.BooleanVar(value=bool(config.get("random_user_agent", False)))
         self.selected_user_agent = tk.StringVar(value=config.get("selected_user_agent", "") or (get_user_agent_library(config)[0] if get_user_agent_library(config) else ""))
         self.custom_user_agent = tk.StringVar(value=config.get("custom_user_agent", ""))
@@ -337,8 +340,7 @@ class CombinedParserGUI(RunnerMixin):
                     self.gost_process = None
             if self.tor_process:
                 try:
-                    if self.tor_process.poll() is None:
-                        self.tor_process.terminate()
+                    stop_tor()
                 except Exception:
                     pass
                 finally:
@@ -1015,11 +1017,25 @@ class CombinedParserGUI(RunnerMixin):
             group.pack(fill="x", pady=4)
             self.onion_managed_widgets.append(group)
 
-        tor_install_row = ttk.Frame(tor_frame.body)
-        tor_install_row.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(tor_install_row, text="Install Tor Python deps", command=lambda: messagebox.showinfo("Tor deps", install_tor_dependencies(log_func=self._write_log_threadsafe).get("message"))).pack(side="left")
-        ttk.Button(tor_install_row, text="Start Tor", command=self.offer_start_tor_dialog).pack(side="left", padx=(8, 0))
-        ToolTip(tor_install_row, "Use these helpers if requests[socks]/stem are missing or Tor needs to be launched manually.")
+        tor_auto = ttk.Checkbutton(tor_frame.body, text="Auto-launch Tor when needed", variable=self.auto_launch_tor)
+        tor_auto.pack(anchor="w", padx=10, pady=4)
+        ToolTip(tor_auto, "When a .onion target is processed and Tor is down, ParserPro will start tor.exe and wait up to 20 seconds.")
+
+        ttk.Label(tor_frame.body, text="Tor Executable Path").pack(anchor="w", padx=10, pady=(8, 2))
+        tor_path_row = ttk.Frame(tor_frame.body)
+        tor_path_row.pack(fill="x", padx=10, pady=(0, 8))
+        ttk.Entry(tor_path_row, textvariable=self.tor_executable_path).pack(side="left", fill="x", expand=True)
+        tor_browse_btn = ttk.Button(tor_path_row, text="Browse", command=self.browse_tor_executable)
+        tor_browse_btn.pack(side="left", padx=(8, 0))
+        ToolTip(tor_path_row, "Path to tor.exe, typically ...\\Tor Browser\\Browser\\TorBrowser\\Tor\\tor.exe")
+
+        tor_actions_row = ttk.Frame(tor_frame.body)
+        tor_actions_row.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(tor_actions_row, text="Auto-Detect Tor", command=self.auto_detect_tor_path).pack(side="left")
+        ttk.Button(tor_actions_row, text="Test Tor Connection", command=self.test_tor_connection).pack(side="left", padx=(8, 0))
+        ttk.Button(tor_actions_row, text="Install Tor Python deps", command=lambda: messagebox.showinfo("Tor deps", install_tor_dependencies(log_func=self._write_log_threadsafe).get("message"))).pack(side="left", padx=(8, 0))
+        ToolTip(tor_actions_row, "Auto-detect tor.exe and validate socks5://127.0.0.1:9050 connectivity.")
+
         self.enable_onion_processing.trace_add("write", self.update_onion_settings_state)
         self.update_onion_settings_state()
 
@@ -1274,7 +1290,7 @@ class CombinedParserGUI(RunnerMixin):
         button_row.pack(fill="x", padx=12, pady=(0, 12))
 
         def _start():
-            ok, msg, proc = start_tor_process(config)
+            ok, msg, proc = start_tor(self.tor_executable_path.get().strip() or None, socks_port=int(config.get("tor_socks_port", 9050) or 9050))
             if ok:
                 self.tor_process = proc
                 messagebox.showinfo("Tor", msg)
@@ -1285,6 +1301,38 @@ class CombinedParserGUI(RunnerMixin):
         ttk.Button(button_row, text="Start Tor", command=_start).pack(side="left")
         ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side="right")
 
+
+    def auto_detect_tor_path(self):
+        detected = detect_tor_executable()
+        if detected:
+            self.tor_executable_path.set(detected)
+            messagebox.showinfo("Tor", f"Detected tor.exe at:\n{detected}")
+        else:
+            messagebox.showwarning("Tor", "Tor executable not found automatically. Install Tor Browser and use Browse.")
+
+    def browse_tor_executable(self):
+        path = filedialog.askopenfilename(title="Select tor.exe", filetypes=[("Tor executable", "tor.exe"), ("Executable", "*.exe"), ("All files", "*.*")])
+        if path:
+            self.tor_executable_path.set(path)
+
+    def test_tor_connection(self):
+        port = int(config.get("tor_socks_port", 9050) or 9050)
+        if is_tor_running(port=port):
+            self._write_log_threadsafe(f"[Tor] Using existing Tor instance on 127.0.0.1:{port}")
+            messagebox.showinfo("Tor", f"Tor SOCKS5 is reachable on 127.0.0.1:{port}")
+            return
+        if self.auto_launch_tor.get():
+            self._write_log_threadsafe("[Tor] Starting Tor process...")
+            ok, msg, proc = start_tor(self.tor_executable_path.get().strip() or None, socks_port=port)
+            if ok:
+                self.tor_process = proc
+                self._write_log_threadsafe(msg)
+                messagebox.showinfo("Tor", f"Tor started and reachable on 127.0.0.1:{port}")
+            else:
+                self._write_log_threadsafe(msg)
+                messagebox.showwarning("Tor", msg)
+            return
+        messagebox.showwarning("Tor", "Tor is not reachable and auto-launch is disabled.")
 
     def _toggle_exclusions_button(self, *_args):
         if hasattr(self, "exclusions_button"):
@@ -1359,6 +1407,8 @@ class CombinedParserGUI(RunnerMixin):
         config['proxy_list_file'] = self.proxy_list_file.get().strip()
         config['enable_onion_processing'] = bool(self.enable_onion_processing.get())
         config['use_nordvpn_onion_only'] = bool(self.use_nordvpn_onion_only.get())
+        config['auto_launch_tor'] = bool(self.auto_launch_tor.get())
+        config['tor_executable_path'] = self.tor_executable_path.get().strip()
         config['random_user_agent'] = bool(self.random_user_agent.get())
         config['selected_user_agent'] = self.selected_user_agent.get().strip()
         config['custom_user_agent'] = self.custom_user_agent.get().strip()
@@ -2400,10 +2450,16 @@ class CombinedParserGUI(RunnerMixin):
             if config.get("proxy_url", "").strip() and not proxy:
                 self.record_event("WARN", "proxy", "disable", "Proxy disabled due to unreachable", {"proxy_url": config.get("proxy_url", "").strip()})
 
-            if bool(config.get("enable_onion_processing", False)) and onion_site_combos and not is_tor_running():
-                self.ui_queue.put(("status_text", "Tor is required for onion extraction."))
-                self.root.after(0, lambda: self.offer_start_tor_dialog(reason="Tor proxy is required before this run can process .onion targets."))
-                raise RuntimeError("Tor is required for onion extraction but is not running on 127.0.0.1:9050")
+            if bool(config.get("enable_onion_processing", False)) and onion_site_combos and not is_tor_running(port=int(config.get("tor_socks_port", 9050) or 9050)):
+                if bool(config.get("auto_launch_tor", True)):
+                    self._write_log_threadsafe("[Tor] Starting Tor process...")
+                    ok, msg, proc = start_tor(str(config.get("tor_executable_path", "")).strip() or None, socks_port=int(config.get("tor_socks_port", 9050) or 9050))
+                    self._write_log_threadsafe(msg)
+                    if ok:
+                        self.tor_process = proc
+                if not is_tor_running(port=int(config.get("tor_socks_port", 9050) or 9050)):
+                    self._write_log_threadsafe("[Tor] Failed to start — skipping .onion")
+                    self.ui_queue.put(("status_text", "Tor unavailable; skipping .onion targets."))
 
             if self.extract_forms.get() and site_combos:
                 site_list = []
@@ -2471,7 +2527,15 @@ class CombinedParserGUI(RunnerMixin):
                     current_proxy = self.proxy_manager.get_proxy() if (self.proxy_manager and scope_applies(config.get("proxy_scope", "both"), base)) else proxy
                     nordvpn_onion_cli = None
                     if is_onion_url(base):
-                        if not is_tor_running():
+                        if not is_tor_running(port=int(config.get("tor_socks_port", 9050) or 9050)):
+                            if bool(config.get("auto_launch_tor", True)):
+                                self._write_log_threadsafe("[Tor] Starting Tor process...")
+                                ok, msg, proc = start_tor(str(config.get("tor_executable_path", "")).strip() or None, socks_port=int(config.get("tor_socks_port", 9050) or 9050))
+                                self._write_log_threadsafe(msg)
+                                if ok:
+                                    self.tor_process = proc
+                        if not is_tor_running(port=int(config.get("tor_socks_port", 9050) or 9050)):
+                            self._write_log_threadsafe("[Tor] Failed to start — skipping .onion")
                             return {"status": "fetch_failed", "error_code": "tor_error", "error_hint": "Tor is not running", "error_detail": "Start Tor Browser or tor service on 127.0.0.1:9050"}
                         nordvpn_onion_cli = self.ensure_nordvpn_onion_route()
                         onion_status = classify_onion_reachability(base, user_agent=resolve_user_agent(config, target_url=base))

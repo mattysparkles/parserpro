@@ -16,7 +16,7 @@ except ImportError:
 
 from app_logging import logger, log_once
 from config import config, get_intercept_proxy
-from helpers import normalize_and_validate_target, resolve_user_agent
+from helpers import is_onion_url, normalize_and_validate_target, resolve_user_agent
 from logging import write_detailed, write_privacy
 
 
@@ -207,7 +207,9 @@ def get_dbc_client(user, password):
 def _fetch_page_playwright_once(clean_url, effective_proxy):
     # FIXED: Proxy fallback + single chromedriver check
     launch_args = {"headless": True, "args": ["--disable-blink-features=AutomationControlled"]}
-    if effective_proxy:
+    if is_onion_url(clean_url):
+        launch_args["proxy"] = {"server": "socks5://127.0.0.1:9050"}
+    elif effective_proxy:
         launch_args["proxy"] = {"server": effective_proxy["server"]}
 
     with sync_playwright() as p:
@@ -222,7 +224,8 @@ def _fetch_page_playwright_once(clean_url, effective_proxy):
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         page = context.new_page()
-        page.goto(clean_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
+        timeout_ms = max(90000, PLAYWRIGHT_TIMEOUT_MS) if is_onion_url(clean_url) else PLAYWRIGHT_TIMEOUT_MS
+        page.goto(clean_url, wait_until="domcontentloaded", timeout=timeout_ms)
         page.wait_for_timeout(4000)
         html = page.content()
         browser.close()

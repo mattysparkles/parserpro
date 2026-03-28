@@ -189,6 +189,8 @@ def load_config():
     loaded.setdefault("defender_exclusions_ack", False)
     loaded.setdefault("auto_configure_nordvpn_path", True)
     loaded.setdefault("enable_onion_processing", False)
+    loaded.setdefault("auto_launch_tor", True)
+    loaded.setdefault("tor_socks_port", 9050)
     loaded.setdefault("use_nordvpn_onion_only", False)
     loaded.setdefault("random_user_agent", False)
     loaded.setdefault("selected_user_agent", "")
