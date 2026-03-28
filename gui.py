@@ -808,11 +808,19 @@ class CombinedParserGUI(RunnerMixin):
         messagebox.showinfo("Credential Test", f"{site}: hits={result.get('hits',0)} status={result.get('status')}")
 
     def open_settings(self):
+        if self.settings_window and self.settings_window.winfo_exists():
+            if self.settings_window.state() == "iconic":
+                self.settings_window.deiconify()
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
+
         settings_window = tk.Toplevel(self.root)
         self.settings_window = settings_window
         settings_window.title("Settings")
         settings_window.geometry("760x760")
         settings_window.minsize(640, 520)
+        settings_window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
 
         outer = ttk.Frame(settings_window)
         outer.pack(fill="both", expand=True)
@@ -1429,7 +1437,12 @@ class CombinedParserGUI(RunnerMixin):
         save_config()
         messagebox.showinfo("Settings", "Settings saved.")
         if self.settings_window and self.settings_window.winfo_exists():
+            self._close_settings_window()
+
+    def _close_settings_window(self):
+        if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.destroy()
+        self.settings_window = None
 
     def _resolve_nordvpn_cli(self):
         status = ensure_nordvpn_cli(log_func=self._write_log_threadsafe)
