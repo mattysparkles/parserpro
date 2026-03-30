@@ -481,6 +481,35 @@ Hydra commands are generated from extracted form metadata and combo file placeho
 - Set `proxy_required=false` to continue without proxy.
 - If using Burp/ZAP, confirm listener is active.
 
+### Problem: Conflicting `.onion` statuses (`Tor is not running` + `success_form` / `no_form`)
+
+If logs look inconsistent, it is usually one of these cases:
+
+- **Mixed targets in one run**: clear-web sites can succeed while `.onion` sites fail from Tor issues.
+- **Per-site retries across multiple candidate URLs**: ParserPro checks the base URL and additional login paths; outcomes may differ by path.
+- **Cache interaction**: previously successful sites can be skipped from cache while new `.onion` checks fail now.
+- **Driver/runtime split**: Tor can be up, but Playwright/Selenium driver setup can still fail separately.
+
+Recommended checklist:
+
+1. Enable onion processing and verify Tor SOCKS is listening on `127.0.0.1:9050`.
+2. Turn on **Force recheck** for one clean diagnostic pass (avoids stale cache confusion).
+3. Run one known `.onion` target only (single-line input) to isolate behavior.
+4. Install browser automation dependencies:
+   - `python -m playwright install chromium`
+   - ensure Selenium + Chromedriver are available (or set `chrome_driver_path`)
+5. Keep extraction mode on Playwright for onion targets and use a longer timeout (90s+).
+6. If you still get mixed outcomes, inspect `logs/parserpro_detailed_YYYYMMDD.log` for:
+   - `error_code=tor_error` (Tor path issue)
+   - `error_code=driver_error` or `playwright_not_installed` (browser runtime issue)
+   - `status=no_form` (page reached but no login-like form found)
+
+Interpretation tip:
+
+- `status=success_form confidence=40` means a login form was found, but confidence is relatively weak.
+- `status=no_form` means the page loaded but no login-like form matched heuristics.
+- `Tor is not running` is specifically a transport/routing failure for `.onion` fetches.
+
 ### Problem: TLS/certificate errors
 
 - Install trusted cert chains for intercept proxies.
